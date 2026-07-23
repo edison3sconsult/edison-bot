@@ -77,12 +77,16 @@ SYSTEM = """你是Edison Lim (@edison_ttm) 的内容助手，专门为马来西�
 
 要求：口语化马来西亚华语、短句有节奏、用「—」分段、200-300字、加hashtag"""
 
-async def scrape_fb():
-    pages = [
-        "https://www.facebook.com/ChinaPressMY",
-        "https://www.facebook.com/SinChewDaily",
-        "https://www.facebook.com/nanyang.nysp",
-    ]
+# 新闻网站列表（不需要登录）
+NEWS_SITES = [
+    "https://www.chinapress.com.my",
+    "https://www.sinchew.com.my",
+    "https://www.enanyang.my",
+    "https://www.orientaldaily.com.my",
+]
+
+async def scrape_news():
+    """截图新闻网站首页，拿到今日热点"""
     shots = []
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=[
@@ -91,24 +95,43 @@ async def scrape_fb():
         ])
         ctx = await browser.new_context(
             viewport={"width":1280,"height":900},
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
+            locale="zh-CN"
         )
         page = await ctx.new_page()
-        for url in pages:
+
+        for url in NEWS_SITES:
             try:
+                print(f"截图: {url}")
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(5000)
-                # 截PNG格式
-                shots.append(await page.screenshot(full_page=False, type="png"))
-                await page.evaluate("window.scrollBy(0,800)")
-                await page.wait_for_timeout(3000)
-                shots.append(await page.screenshot(full_page=False, type="png"))
+                await page.wait_for_timeout(4000)
+
+                # 关闭弹窗
+                try:
+                    await page.keyboard.press("Escape")
+                    await page.wait_for_timeout(500)
+                except:
+                    pass
+
+                # 截首屏
+                shot = await page.screenshot(full_page=False, type="png")
+                shots.append({"url": url, "img": shot, "scroll": 0})
+
+                # 滚动截第二屏
+                await page.evaluate("window.scrollBy(0, 700)")
+                await page.wait_for_timeout(2000)
+                shot2 = await page.screenshot(full_page=False, type="png")
+                shots.append({"url": url, "img": shot2, "scroll": 1})
+
+                print(f"✅ {url} 截图成功")
             except Exception as e:
-                print(f"FB截图失败 {url}: {e}")
+                print(f"❌ {url} 截图失败: {e}")
+
         await browser.close()
     return shots
 
 async def scrape_article(url):
+    """截取文章主图+标题"""
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=[
             "--no-sandbox","--disable-setuid-sandbox",
@@ -124,19 +147,21 @@ async def scrape_article(url):
             await page.wait_for_timeout(3000)
             await page.evaluate("""() => {
                 ['header','nav','footer','aside','.sidebar','[class*="ad"]',
-                 '[id*="ad"]','[class*="banner"]','[class*="popup"]'].forEach(sel => {
+                 '[id*="ad"]','[class*="banner"]','[class*="popup"]',
+                 'iframe','video'].forEach(sel => {
                     document.querySelectorAll(sel).forEach(el => el.style.display='none');
                 });
                 const title = document.querySelector('h1');
                 const imgs = [...document.querySelectorAll('img')]
                     .filter(i => (i.naturalWidth||i.width)>300 && i.src &&
-                        !i.src.includes('logo') && !i.src.includes('icon'));
+                        !i.src.includes('logo') && !i.src.includes('icon') &&
+                        !i.src.includes('avatar'));
                 imgs.sort((a,b)=>((b.naturalWidth||b.width)*(b.naturalHeight||b.height))-
                     ((a.naturalWidth||a.width)*(a.naturalHeight||a.height)));
                 const img = imgs[0];
                 if(title && img){
-                    document.body.innerHTML = `<div style="background:#fff;padding:30px;max-width:800px;margin:0 auto;font-family:sans-serif;">
-                        <h1 style="font-size:24px;font-weight:800;color:#111;margin-bottom:20px;border-bottom:3px solid #e30000;padding-bottom:12px;">${title.textContent.trim()}</h1>
+                    document.body.innerHTML = `<div style="background:#fff;padding:24px;max-width:800px;margin:0 auto;font-family:sans-serif;">
+                        <h1 style="font-size:22px;font-weight:800;color:#111;margin-bottom:16px;border-bottom:3px solid #e30000;padding-bottom:12px;">${title.textContent.trim()}</h1>
                         <img src="${img.src}" style="width:100%;border-radius:8px;" /></div>`;
                     document.body.style.cssText='margin:0;padding:0;background:#fff;';
                 }
@@ -149,21 +174,33 @@ async def scrape_article(url):
         finally:
             await browser.close()
 
-def analyze_fb_screenshots(shots):
+def analyze_news(shots):
+    """Claude分析新闻网站截图，选出6个爆款话题"""
     today = datetime.now().strftime("%Y年%m月%d日")
-    # 只取前4张，避免超出token限制
-    b64s = [base64.standard_b64encode(s).decode() for s in shots[:4]]
+    # 取前5张截图发给Claude
+    b64s = [base64.standard_b64encode(s["img"]).decode() for s in shots[:5]]
 
-    raw = ask_claude(f"""今天是{today}。以上是马来西亚三家中文媒体Facebook的截图。
+    raw = ask_claude(
+        f"""今天是{today}。以上是马来西亚中文新闻网站（中国报、星洲日报、南洋商报、东方日报）首页的截图。
 
-分析截图，找出今日最热的6个话题。
+请仔细分析截图里出现的新闻标题和内容，找出今日最热、最有爆款潜力的6个话题。
 
-严格按照这个格式回复，每个话题一行，字段之间用|||分隔，共6行：
+选题标准：
+- 有争议性或情绪共鸣
+- 有具体数据或名人事件  
+- 贴近马来西亚华人日常
+- 在多家媒体出现的优先
+
+严格按照以下格式回复，每个话题一行，用|||分隔，共6行：
 分类|||话题标题|||钩子句|||关键数据|||来源媒体
 
-分类只能是这4种之一：💼商业、📊金融、🧠人间清醒、❤️家庭情感
+分类只能是：💼商业、📊金融、🧠人间清醒、❤️家庭情感
 
-只回复6行内容，不要编号，不要任何其他文字。""", images_b64=b64s)
+只回复6行，不要任何其他文字。""",
+        images_b64=b64s
+    )
+
+    print(f"Claude回复：{raw[:300]}")
 
     topics = []
     for line in raw.strip().split("\n"):
@@ -182,6 +219,7 @@ def analyze_fb_screenshots(shots):
             })
         if len(topics) == 6:
             break
+
     return topics
 
 def gen_caption(t):
@@ -193,11 +231,17 @@ def gen_caption(t):
 按timtiah结构写200-300字Instagram文案。段落间单行换行。只回复文案。""", SYSTEM)
 
 def optimize(original, feedback, t):
-    return ask_claude(f"""原文案：\n{original}\n\n用户反馈：{feedback}\n话题：{t['topic']}\n\n根据反馈优化，保持timtiah结构200-300字，只回复新文案。""", SYSTEM)
+    return ask_claude(f"""原文案：
+{original}
+
+用户反馈：{feedback}
+话题：{t['topic']}
+
+根据反馈优化，保持timtiah结构200-300字，只回复新文案。""", SYSTEM)
 
 def get_article_url(t):
     url = ask_claude(f"""话题：{t['topic']}，来源：{t['source']}，数据：{t['data']}
-请给我这篇新闻最可能的真实URL。只回复URL，不要任何其他文字。""")
+给我这篇马来西亚新闻最可能的真实URL。只回复URL，不要任何其他文字。""")
     url = url.strip()
     return url if url.startswith("http") else None
 
@@ -230,12 +274,15 @@ def handle_msg(msg):
     s = get_s(uid)
 
     if text in ["开始","给我今天的内容","今天的内容","/start","/content"]:
-        send(cid, "⚡ 正在打开三家中文媒体Facebook截图，请稍等约1分钟...")
+        send(cid, "⚡ 正在扫描中国报、星洲日报、南洋商报、东方日报，请稍等约1分钟...")
         def run():
             try:
-                shots = asyncio.run(scrape_fb())
+                shots = asyncio.run(scrape_news())
+                if not shots:
+                    send(cid, "❌ 截图失败，请重试")
+                    return
                 send(cid, f"📸 截了{len(shots)}张，Claude正在分析选出6个爆款话题...")
-                topics = analyze_fb_screenshots(shots)
+                topics = analyze_news(shots)
                 if not topics:
                     send(cid, "❌ 分析失败，请重试")
                     return
@@ -299,6 +346,7 @@ def handle_callback(cb):
         def run():
             try:
                 url = get_article_url(t)
+                print(f"文章URL: {url}")
                 if url:
                     img = asyncio.run(scrape_article(url))
                     if img:
@@ -309,7 +357,8 @@ def handle_callback(cb):
                             return
                 send(cid, "⚠️ 未能截到配图，直接发布文案？", BTN_PUBLISH)
             except Exception as e:
-                send(cid, f"⚠️ 截图失败，直接发布文案？", BTN_PUBLISH)
+                print(f"截图错误: {e}")
+                send(cid, "⚠️ 截图失败，直接发布文案？", BTN_PUBLISH)
         threading.Thread(target=run, daemon=True).start()
         return
 
