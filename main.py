@@ -6,6 +6,7 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHANNEL_ID = os.environ["CHANNEL_ID"]
 CLAUDE_API_KEY = os.environ["CLAUDE_API_KEY"]
 AUTHORIZED_USER = int(os.environ["AUTHORIZED_USER"])
+SCRAPINGBEE_KEY = os.environ.get("SCRAPINGBEE_KEY", "QNEIXTNF4SKJV562MWIFDUR52VYK4R2D8XAFA5HLLAEID57WUH0TM5KOFTAIRIG7CBBRLUV4QPBCLH62")
 BASE = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
@@ -77,102 +78,172 @@ FB_PAGES = [
     {"name": "南洋商报", "url": "https://www.facebook.com/nanyang.nysp"},
 ]
 
-async def scrape_fb_posts():
-    """扫描Facebook，抓取帖子文字+图片URL"""
+def scrape_fb_with_scrapingbee():
+    """用ScrapingBee访问Facebook，绕过反爬虫"""
     all_posts = []
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=[
-            "--no-sandbox","--disable-setuid-sandbox",
-            "--disable-dev-shm-usage","--disable-gpu"
-        ])
-        ctx = await browser.new_context(
-            viewport={"width":1280,"height":900},
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
-            locale="zh-CN",
-            extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"}
-        )
-        page = await ctx.new_page()
-
-        for fb in FB_PAGES:
-            try:
-                print(f"扫描: {fb['url']}")
-                await page.goto(fb["url"], wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(6000)
-
-                # 关闭登录弹窗
-                for selector in ['[aria-label="Close"]', '[data-testid="royal_login_form"] button']:
-                    try:
-                        btn = page.locator(selector).first
-                        if await btn.is_visible():
-                            await btn.click()
-                            await page.wait_for_timeout(1000)
-                    except:
-                        pass
-
-                # 滚动加载更多内容
-                for _ in range(3):
-                    await page.evaluate("window.scrollBy(0, 600)")
-                    await page.wait_for_timeout(2000)
-
-                # 抓取帖子
-                posts = await page.evaluate("""() => {
-                    const results = [];
-                    // 找所有帖子容器
-                    const postContainers = document.querySelectorAll('[data-pagelet*="FeedUnit"], [role="article"]');
-                    
-                    postContainers.forEach(container => {
-                        // 找文字
-                        const textEl = container.querySelector('[data-ad-comet-preview="message"], [data-testid="post_message"], p, span');
-                        const text = textEl ? textEl.innerText.trim() : '';
-                        
-                        // 找图片 - 找最大的图片
-                        const imgs = [...container.querySelectorAll('img')].filter(img => {
-                            const w = img.naturalWidth || img.width || 0;
-                            const h = img.naturalHeight || img.height || 0;
-                            const src = img.src || '';
-                            return w > 300 && h > 200 && src.includes('facebook') && 
-                                   (src.includes('scontent') || src.includes('fbcdn'));
-                        });
-                        
-                        imgs.sort((a,b) => 
-                            ((b.naturalWidth||b.width)*(b.naturalHeight||b.height)) - 
-                            ((a.naturalWidth||a.width)*(a.naturalHeight||a.height))
-                        );
-                        
-                        const imgSrc = imgs.length > 0 ? imgs[0].src : '';
-                        
-                        // 找链接
-                        const links = [...container.querySelectorAll('a[href]')]
-                            .map(a => a.href)
-                            .filter(h => h.includes('sinchew') || h.includes('chinapress') || 
-                                        h.includes('enanyang') || h.includes('orientaldaily') ||
-                                        h.includes('malaymail') || h.includes('thestar'));
-                        
-                        if (text.length > 10 || imgSrc) {
-                            results.push({
-                                text: text.slice(0, 300),
-                                img: imgSrc,
-                                link: links[0] || ''
-                            });
-                        }
-                    });
-                    
-                    return results.slice(0, 15);
-                }""")
-
-                for post in posts:
-                    post["source"] = fb["name"]
-                all_posts.extend(posts)
-                print(f"✅ {fb['name']}: {len(posts)} 篇帖子")
-
-            except Exception as e:
-                print(f"❌ {fb['name']}: {e}")
-
-        await browser.close()
+    
+    fb_pages = [
+        {"name": "中国报", "url": "https://www.facebook.com/ChinaPressMY"},
+        {"name": "星洲日报", "url": "https://www.facebook.com/SinChewDaily"},
+        {"name": "南洋商报", "url": "https://www.facebook.com/nanyang.nysp"},
+    ]
+    
+    for fb in fb_pages:
+        try:
+            print(f"ScrapingBee抓取: {fb['url']}")
+            r = requests.get(
+                "https://app.scrapingbee.com/api/v1/",
+                params={
+                    "api_key": SCRAPINGBEE_KEY,
+                    "url": fb["url"],
+                    "render_js": "true",
+                    "wait": "5000",
+                    "window_width": "1280",
+                    "window_height": "900",
+                },
+                timeout=60
+            )
+            
+            if r.status_code != 200:
+                print(f"❌ {fb['name']}: {r.status_code}")
+                continue
+            
+            html = r.text
+            
+            # 从HTML提取图片URL (scontent = Facebook CDN图片)
+            img_urls = re.findall(r'(https://scontent[^"'\s]+\.(?:jpg|jpeg|png|webp)(?:[^"'\s]*)?)', html)
+            
+            # 提取文字内容
+            texts = re.findall(r'"message":\{"text":"([^"]{20,300})"', html)
+            if not texts:
+                # 备用：找中文内容
+                texts = re.findall(r'[一-鿿][^
+<"]{20,200}', html)
+            
+            print(f"✅ {fb['name']}: {len(img_urls)}张图, {len(texts)}条文字")
+            
+            # 配对文字和图片
+            for i, text in enumerate(texts[:10]):
+                img = img_urls[i] if i < len(img_urls) else ""
+                all_posts.append({
+                    "source": fb["name"],
+                    "text": text[:200],
+                    "img": img,
+                })
+                
+        except Exception as e:
+            print(f"❌ {fb['name']}: {e}")
+    
     return all_posts
 
-def download_fb_image(img_url):
+def download_image_scrapingbee(img_url):
+    """用ScrapingBee下载图片"""
+    if not img_url:
+        return None
+    try:
+        # 先直接试下载（Facebook CDN图片有时可以直接下）
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Referer": "https://www.facebook.com/",
+        }
+        r = requests.get(img_url, headers=headers, timeout=15)
+        if r.status_code == 200 and len(r.content) > 5000:
+            print(f"✅ 直接下载成功")
+            return r.content
+    except:
+        pass
+    
+    try:
+        # 用ScrapingBee下载
+        r = requests.get(
+            "https://app.scrapingbee.com/api/v1/",
+            params={
+                "api_key": SCRAPINGBEE_KEY,
+                "url": img_url,
+                "render_js": "false",
+            },
+            timeout=30
+        )
+        if r.status_code == 200 and len(r.content) > 5000:
+            print(f"✅ ScrapingBee下载成功")
+            return r.content
+    except Exception as e:
+        print(f"图片下载失败: {e}")
+    
+    return None
+
+def search_google_image(topic):
+    """用ScrapingBee搜索Google Images"""
+    try:
+        query = topic + " Malaysia 2026"
+        search_url = f"https://www.google.com/search?q={requests.utils.quote(query)}&tbm=isch"
+        
+        r = requests.get(
+            "https://app.scrapingbee.com/api/v1/",
+            params={
+                "api_key": SCRAPINGBEE_KEY,
+                "url": search_url,
+                "render_js": "true",
+                "wait": "3000",
+            },
+            timeout=45
+        )
+        
+        if r.status_code != 200:
+            return None
+            
+        # 找图片URL
+        urls = re.findall(r'(https://[^"'\s]+\.(?:jpg|jpeg|png|webp))', r.text)
+        urls = [u for u in urls if not any(k in u for k in ['google','gstatic','logo','icon'])]
+        
+        if urls:
+            # 下载第一张
+            img_r = requests.get(urls[0], timeout=10)
+            if img_r.status_code == 200 and len(img_r.content) > 5000:
+                print(f"✅ Google图片找到: {urls[0][:60]}")
+                return img_r.content
+    except Exception as e:
+        print(f"Google图片搜索失败: {e}")
+    return None
+
+def get_best_image(topic, source, img_url):
+    """获取最佳配图"""
+    # 1. 先试Facebook帖子图片
+    if img_url:
+        img = download_image_scrapingbee(img_url)
+        if img:
+            return img
+    
+    # 2. Google Images搜索
+    img = search_google_image(topic)
+    if img:
+        return img
+    
+    # 3. 备用：Unsplash
+    try:
+        keyword_map = {
+            "关税": "tariff trade", "令吉": "malaysia ringgit",
+            "油价": "petrol fuel", "RON95": "petrol pump",
+            "选举": "malaysia election", "谢贤": "hong kong actor",
+            "交通": "traffic accident", "AI": "artificial intelligence",
+            "华为": "huawei technology", "诈骗": "fraud scam",
+        }
+        kw = next((v for k,v in keyword_map.items() if k in topic), "malaysia news")
+        r = requests.get(f"https://source.unsplash.com/800x500/?{requests.utils.quote(kw)}", 
+                        timeout=15, allow_redirects=True)
+        if r.status_code == 200 and len(r.content) > 5000:
+            print("✅ Unsplash备用图片")
+            return r.content
+    except:
+        pass
+    
+    return None
+
+async def scrape_fb_posts():
+    """兼容接口，实际用ScrapingBee"""
+    return scrape_fb_with_scrapingbee()
+
+def def download_fb_image(img_url):
     """下载Facebook帖子图片"""
     if not img_url:
         return None
@@ -365,9 +436,7 @@ def handle_callback(cb):
         def run():
             try:
                 img_url = t.get("img_url", "")
-                img = None
-                if img_url:
-                    img = download_fb_image(img_url)
+                img = get_best_image(t["topic"], t["source"], img_url)
 
                 if img:
                     s["screenshots"][idx] = img
