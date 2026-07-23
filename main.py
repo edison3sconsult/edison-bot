@@ -9,7 +9,6 @@ AUTHORIZED_USER = int(os.environ["AUTHORIZED_USER"])
 BASE = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
-# ── Telegram ─────────────────────────────────────────
 def send(chat_id, text, reply_markup=None):
     data = {"chat_id": chat_id, "text": text}
     if reply_markup:
@@ -25,7 +24,7 @@ def send_photo_bytes(chat_id, img_bytes, caption, reply_markup=None):
         data["reply_markup"] = json.dumps(reply_markup)
     try:
         return requests.post(f"{BASE}/sendPhoto", data=data,
-            files={"photo": ("news.jpg", img_bytes, "image/png")}, timeout=30).json()
+            files={"photo": ("news.png", img_bytes, "image/png")}, timeout=30).json()
     except:
         return {}
 
@@ -34,7 +33,7 @@ def send_channel(img_bytes, caption):
         if img_bytes:
             r = requests.post(f"{BASE}/sendPhoto",
                 data={"chat_id": CHANNEL_ID, "caption": caption},
-                files={"photo": ("news.jpg", img_bytes, "image/png")}, timeout=30).json()
+                files={"photo": ("news.png", img_bytes, "image/png")}, timeout=30).json()
             if r.get("ok"):
                 return True
         requests.post(f"{BASE}/sendMessage",
@@ -50,7 +49,6 @@ def answer_cb(cb_id):
     except:
         pass
 
-# ── Claude ───────────────────────────────────────────
 def ask_claude(prompt, system="", images_b64=None):
     content = []
     if images_b64:
@@ -79,7 +77,6 @@ SYSTEM = """你是Edison Lim (@edison_ttm) 的内容助手，专门为马来西�
 
 要求：口语化马来西亚华语、短句有节奏、用「—」分段、200-300字、加hashtag"""
 
-# ── Playwright ───────────────────────────────────────
 async def scrape_fb():
     pages = [
         "https://www.facebook.com/ChinaPressMY",
@@ -101,10 +98,11 @@ async def scrape_fb():
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(5000)
-                shots.append(await page.screenshot(full_page=False))
+                # 截PNG格式
+                shots.append(await page.screenshot(full_page=False, type="png"))
                 await page.evaluate("window.scrollBy(0,800)")
                 await page.wait_for_timeout(3000)
-                shots.append(await page.screenshot(full_page=False))
+                shots.append(await page.screenshot(full_page=False, type="png"))
             except Exception as e:
                 print(f"FB截图失败 {url}: {e}")
         await browser.close()
@@ -144,7 +142,7 @@ async def scrape_article(url):
                 }
             }""")
             await page.wait_for_timeout(2000)
-            return await page.screenshot(full_page=False)
+            return await page.screenshot(full_page=False, type="png")
         except Exception as e:
             print(f"文章截图失败: {e}")
             return None
@@ -152,38 +150,30 @@ async def scrape_article(url):
             await browser.close()
 
 def analyze_fb_screenshots(shots):
-    """Claude看截图，返回6个话题（纯文字，不是JSON）"""
     today = datetime.now().strftime("%Y年%m月%d日")
-    b64s = [base64.standard_b64encode(s).decode() for s in shots[:6]]
+    # 只取前4张，避免超出token限制
+    b64s = [base64.standard_b64encode(s).decode() for s in shots[:4]]
 
     raw = ask_claude(f"""今天是{today}。以上是马来西亚三家中文媒体Facebook的截图。
 
 分析截图，找出今日最热的6个话题。
 
-用这个格式回复，每个话题一行，用|||分隔字段：
+严格按照这个格式回复，每个话题一行，字段之间用|||分隔，共6行：
 分类|||话题标题|||钩子句|||关键数据|||来源媒体
 
-分类只能是：💼商业、📊金融、🧠人间清醒、❤️家庭情感
+分类只能是这4种之一：💼商业、📊金融、🧠人间清醒、❤️家庭情感
 
-例子：
-💼商业|||Tealive净利润跌58%|||Tealive 950家门店，净利润却跌了58%|||净利润从RM3,700万跌到RM2,146万|||南洋商报
-📊金融|||RON95补贴省下的钱|||财政部省了RM80亿，但去了哪里？|||截至7月净省RM4亿升汽油|||星洲日报
-🧠人间清醒|||森林城市网校19人失踪|||430人涉案，19人下落不明|||移民局调查非法出入境|||中国报
-❤️家庭情感|||谢贤离世|||谢霆锋雇人照顾但不在身边，父亲走了|||89岁，7月16日肺炎离世|||东方日报
-🧠人间清醒|||15岁无牌司机撞死人|||15岁，罗里，撞死摩托骑士，四个违规|||大马每年交通事故死亡超6000人|||星洲日报
-📊金融|||特朗普关税重启|||7月24日大马税率升至10-12.5%|||大马出口美国占比12%|||南洋商报
-
-只回复6行，不要任何其他文字。""", images_b64=b64s)
+只回复6行内容，不要编号，不要任何其他文字。""", images_b64=b64s)
 
     topics = []
-    for i, line in enumerate(raw.strip().split("\n")):
+    for line in raw.strip().split("\n"):
         line = line.strip()
         if not line or "|||" not in line:
             continue
         parts = line.split("|||")
         if len(parts) >= 5:
             topics.append({
-                "num": i+1,
+                "num": len(topics)+1,
                 "cat": parts[0].strip(),
                 "topic": parts[1].strip(),
                 "hook": parts[2].strip(),
@@ -192,7 +182,6 @@ def analyze_fb_screenshots(shots):
             })
         if len(topics) == 6:
             break
-
     return topics
 
 def gen_caption(t):
@@ -208,13 +197,10 @@ def optimize(original, feedback, t):
 
 def get_article_url(t):
     url = ask_claude(f"""话题：{t['topic']}，来源：{t['source']}，数据：{t['data']}
-
-请给我这篇新闻最可能的真实URL。
-只回复URL，不要任何其他文字。""")
+请给我这篇新闻最可能的真实URL。只回复URL，不要任何其他文字。""")
     url = url.strip()
     return url if url.startswith("http") else None
 
-# ── 按钮 ─────────────────────────────────────────────
 BTN_CAPTION = {"inline_keyboard":[[
     {"text":"✅ 文案满意","callback_data":"caption_ok"},
     {"text":"✏️ 修改文案","callback_data":"caption_edit"}
@@ -228,7 +214,6 @@ BTN_NEXT = {"inline_keyboard":[[
     {"text":"🏁 今天完成","callback_data":"done"}
 ]]}
 
-# ── 状态 ─────────────────────────────────────────────
 state = {}
 
 def get_s(uid):
@@ -236,7 +221,6 @@ def get_s(uid):
         state[uid] = {"step":"idle","topics":[],"captions":[],"screenshots":[],"idx":0}
     return state[uid]
 
-# ── 消息处理 ─────────────────────────────────────────
 def handle_msg(msg):
     uid = msg["from"]["id"]
     cid = msg["chat"]["id"]
@@ -364,7 +348,6 @@ def handle_callback(cb):
         s["step"] = "idle"
         return
 
-# ── 主循环 ───────────────────────────────────────────
 def main():
     print("✅ Edison Bot V2 启动！")
     offset = 0
