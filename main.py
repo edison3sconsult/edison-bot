@@ -64,6 +64,7 @@ def ask_claude(prompt, system="", images_b64=None):
         system=system or "你是Edison Lim的马来西亚华语内容助手。",
         messages=[{"role": "user", "content": content}]
     )
+    if not msg.content: raise ValueError("Claude返回空内容")
     return msg.content[0].text
 
 SYSTEM = """你是Edison Lim (@edison_ttm) 的内容助手，专门为马来西亚华人生成爆款内容。
@@ -435,7 +436,8 @@ def main():
         try:
             r = requests.get(f"{BASE}/getUpdates",
                 params={"offset":offset,"timeout":30}, timeout=35)
-            for u in r.json().get("result",[]):
+            data = r.json()
+            for u in data.get("result", []):
                 offset = u["update_id"] + 1
                 if "message" in u:
                     handle_msg(u["message"])
