@@ -24,7 +24,7 @@ def send_photo_bytes(chat_id, img_bytes, caption, reply_markup=None):
         data["reply_markup"] = json.dumps(reply_markup)
     try:
         return requests.post(f"{BASE}/sendPhoto", data=data,
-            files={"photo": ("news.png", img_bytes, "image/png")}, timeout=30).json()
+            files={"photo": ("news.jpg", img_bytes, "image/jpeg")}, timeout=30).json()
     except:
         return {}
 
@@ -33,7 +33,7 @@ def send_channel(img_bytes, caption):
         if img_bytes:
             r = requests.post(f"{BASE}/sendPhoto",
                 data={"chat_id": CHANNEL_ID, "caption": caption},
-                files={"photo": ("news.png", img_bytes, "image/png")}, timeout=30).json()
+                files={"photo": ("news.jpg", img_bytes, "image/jpeg")}, timeout=30).json()
             if r.get("ok"):
                 return True
         requests.post(f"{BASE}/sendMessage",
@@ -49,20 +49,12 @@ def answer_cb(cb_id):
     except:
         pass
 
-def ask_claude(prompt, system="", images_b64=None):
-    content = []
-    if images_b64:
-        for b64 in images_b64:
-            content.append({
-                "type": "image",
-                "source": {"type": "base64", "media_type": "image/png", "data": b64}
-            })
-    content.append({"type": "text", "text": prompt})
+def ask_claude(prompt, system=""):
     msg = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=3000,
         system=system or "你是Edison Lim的马来西亚华语内容助手。",
-        messages=[{"role": "user", "content": content}]
+        messages=[{"role": "user", "content": prompt}]
     )
     if not msg.content:
         raise ValueError("Claude返回空内容")
@@ -79,15 +71,16 @@ SYSTEM = """你是Edison Lim (@edison_ttm) 的内容助手，专门为马来西�
 
 要求：口语化马来西亚华语、短句有节奏、用「—」分段、200-300字、加hashtag"""
 
-NEWS_SITES = [
-    {"name": "中国报", "url": "https://www.chinapress.com.my"},
-    {"name": "星洲日报", "url": "https://www.sinchew.com.my"},
-    {"name": "南洋商报", "url": "https://www.enanyang.my"},
-    {"name": "东方日报", "url": "https://www.orientaldaily.com.my"},
+FB_PAGES = [
+    {"name": "中国报", "url": "https://www.facebook.com/ChinaPressMY"},
+    {"name": "星洲日报", "url": "https://www.facebook.com/SinChewDaily"},
+    {"name": "南洋商报", "url": "https://www.facebook.com/nanyang.nysp"},
 ]
 
-async def scrape_news_with_links():
-    results = []
+async def scrape_fb_posts():
+    """扫描Facebook，抓取帖子文字+图片URL"""
+    all_posts = []
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=[
             "--no-sandbox","--disable-setuid-sandbox",
@@ -95,136 +88,129 @@ async def scrape_news_with_links():
         ])
         ctx = await browser.new_context(
             viewport={"width":1280,"height":900},
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
-            locale="zh-CN"
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
+            locale="zh-CN",
+            extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"}
         )
         page = await ctx.new_page()
-        for site in NEWS_SITES:
-            try:
-                await page.goto(site["url"], wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(4000)
-                try:
-                    await page.keyboard.press("Escape")
-                    await page.wait_for_timeout(500)
-                except:
-                    pass
-                articles = await page.evaluate("""() => {
-                    const items = [];
-                    const seen = new Set();
-                    const links = [...document.querySelectorAll('a[href]')];
-                    for (const a of links) {
-                        const href = a.href;
-                        if (!href || seen.has(href)) continue;
-                        if (href.includes('javascript') || href.includes('#')) continue;
-                        const text = (a.innerText || a.textContent || '').trim();
-                        if (!text || text.length < 8 || text.length > 200) continue;
-                        seen.add(href);
-                        items.push({title: text, url: href});
-                        if (items.length >= 25) break;
-                    }
-                    return items;
-                }""")
-                results.append({
-                    "site": site["name"],
-                    "url": site["url"],
-                    "articles": articles
-                })
-                print(f"✅ {site['name']}: {len(articles)} 篇")
-            except Exception as e:
-                print(f"❌ {site['name']}: {e}")
-        await browser.close()
-    return results
 
-async def get_news_image(topic, source, article_url):
-    """用Unsplash搜索相关图片，稳定快速"""
-    
-    # 关键词映射：话题 -> 英文搜索词
-    keyword_map = {
-        "关税": "tariff trade war",
-        "特朗普": "donald trump",
-        "令吉": "malaysia ringgit currency",
-        "股市": "stock market malaysia",
-        "经济": "malaysia economy",
-        "油价": "petrol fuel pump malaysia",
-        "RON95": "petrol fuel pump",
-        "补贴": "fuel subsidy malaysia",
-        "森林城市": "forest city johor",
-        "选举": "malaysia election voting",
-        "森州": "negeri sembilan malaysia",
-        "柔佛": "johor malaysia",
-        "华为": "huawei technology",
-        "AI": "artificial intelligence technology",
-        "OpenAI": "artificial intelligence robot",
-        "谢贤": "hong kong celebrity actor",
-        "交通": "malaysia traffic accident road",
-        "无牌": "car accident malaysia road",
-        "房价": "malaysia property house",
-        "失业": "unemployment job malaysia",
-        "大学": "university malaysia graduate",
-        "医院": "hospital malaysia healthcare",
-        "诈骗": "malaysia scam fraud",
-        "TikTok": "social media smartphone",
-        "Grab": "grab malaysia food delivery",
-        "ZUS": "coffee malaysia cafe",
-        "Tealive": "bubble tea malaysia",
-    }
-    
-    # 找最匹配的关键词
-    search_term = "malaysia news"
-    for kw, eng in keyword_map.items():
-        if kw in topic:
-            search_term = eng
-            break
-    
-    print(f"Unsplash搜索: {search_term}")
-    
+        for fb in FB_PAGES:
+            try:
+                print(f"扫描: {fb['url']}")
+                await page.goto(fb["url"], wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(6000)
+
+                # 关闭登录弹窗
+                for selector in ['[aria-label="Close"]', '[data-testid="royal_login_form"] button']:
+                    try:
+                        btn = page.locator(selector).first
+                        if await btn.is_visible():
+                            await btn.click()
+                            await page.wait_for_timeout(1000)
+                    except:
+                        pass
+
+                # 滚动加载更多内容
+                for _ in range(3):
+                    await page.evaluate("window.scrollBy(0, 600)")
+                    await page.wait_for_timeout(2000)
+
+                # 抓取帖子
+                posts = await page.evaluate("""() => {
+                    const results = [];
+                    // 找所有帖子容器
+                    const postContainers = document.querySelectorAll('[data-pagelet*="FeedUnit"], [role="article"]');
+                    
+                    postContainers.forEach(container => {
+                        // 找文字
+                        const textEl = container.querySelector('[data-ad-comet-preview="message"], [data-testid="post_message"], p, span');
+                        const text = textEl ? textEl.innerText.trim() : '';
+                        
+                        // 找图片 - 找最大的图片
+                        const imgs = [...container.querySelectorAll('img')].filter(img => {
+                            const w = img.naturalWidth || img.width || 0;
+                            const h = img.naturalHeight || img.height || 0;
+                            const src = img.src || '';
+                            return w > 300 && h > 200 && src.includes('facebook') && 
+                                   (src.includes('scontent') || src.includes('fbcdn'));
+                        });
+                        
+                        imgs.sort((a,b) => 
+                            ((b.naturalWidth||b.width)*(b.naturalHeight||b.height)) - 
+                            ((a.naturalWidth||a.width)*(a.naturalHeight||a.height))
+                        );
+                        
+                        const imgSrc = imgs.length > 0 ? imgs[0].src : '';
+                        
+                        // 找链接
+                        const links = [...container.querySelectorAll('a[href]')]
+                            .map(a => a.href)
+                            .filter(h => h.includes('sinchew') || h.includes('chinapress') || 
+                                        h.includes('enanyang') || h.includes('orientaldaily') ||
+                                        h.includes('malaymail') || h.includes('thestar'));
+                        
+                        if (text.length > 10 || imgSrc) {
+                            results.push({
+                                text: text.slice(0, 300),
+                                img: imgSrc,
+                                link: links[0] || ''
+                            });
+                        }
+                    });
+                    
+                    return results.slice(0, 15);
+                }""")
+
+                for post in posts:
+                    post["source"] = fb["name"]
+                all_posts.extend(posts)
+                print(f"✅ {fb['name']}: {len(posts)} 篇帖子")
+
+            except Exception as e:
+                print(f"❌ {fb['name']}: {e}")
+
+        await browser.close()
+    return all_posts
+
+def download_fb_image(img_url):
+    """下载Facebook帖子图片"""
+    if not img_url:
+        return None
     try:
-        # Unsplash Source API - 免费无需key
-        url = f"https://source.unsplash.com/800x500/?{requests.utils.quote(search_term)}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
-        if r.status_code == 200 and len(r.content) > 10000:
-            print("✅ Unsplash图片获取成功")
-            # 在图片上叠加标题文字
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Referer": "https://www.facebook.com/",
+            "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+        }
+        r = requests.get(img_url, headers=headers, timeout=15)
+        if r.status_code == 200 and len(r.content) > 5000:
             return r.content
     except Exception as e:
-        print(f"Unsplash失败: {e}")
-    
-    # 备用：Picsum随机图片（保证有图）
-    try:
-        r = requests.get("https://picsum.photos/800/500", timeout=10, allow_redirects=True)
-        if r.status_code == 200:
-            print("✅ 备用图片获取成功")
-            return r.content
-    except:
-        pass
-    
+        print(f"下载图片失败: {e}")
     return None
 
-
-
-def select_topics(news_results):
+def select_topics(posts):
+    """Claude分析帖子，选出6个爆款话题"""
     today = datetime.now().strftime("%Y年%m月%d日")
-    news_text = f"今天是{today}。以下是马来西亚中文媒体今日新闻列表：\n\n"
-    for r in news_results:
-        news_text += f"【{r['site']}】\n"
-        for i, a in enumerate(r["articles"][:20]):
-            news_text += f"{i+1}. {a['title']} | {a['url']}\n"
-        news_text += "\n"
 
-    news_text += """请从以上新闻中选出6个最有爆款潜力的话题。
+    posts_text = f"今天是{today}。以下是马来西亚三家中文媒体Facebook今日帖子：\n\n"
+    for i, p in enumerate(posts[:30]):
+        posts_text += f"{i+1}. [{p['source']}] {p['text'][:150]}\n"
+    posts_text += "\n"
 
-选题标准：有争议性、有情绪共鸣、有数据、贴近马来西亚华人日常。
+    posts_text += """请从以上帖子中选出6个最有爆款潜力的话题。
+
+选题标准：有争议性、有情绪共鸣、贴近马来西亚华人日常、多家媒体出现的优先。
 
 严格按以下格式回复，每行一个话题，用|||分隔，共6行：
-分类|||话题标题|||钩子句|||关键数据|||来源媒体|||新闻URL
+分类|||话题标题|||钩子句|||关键数据|||来源媒体|||帖子编号
 
 分类只能是：💼商业、📊金融、🧠人间清醒、❤️家庭情感
 
 只回复6行，不要任何其他文字。"""
 
-    raw = ask_claude(news_text)
-    print(f"Claude选题：\n{raw[:500]}")
+    raw = ask_claude(posts_text)
+    print(f"Claude选题：\n{raw[:400]}")
 
     topics = []
     for line in raw.strip().split("\n"):
@@ -233,6 +219,18 @@ def select_topics(news_results):
             continue
         parts = line.split("|||")
         if len(parts) >= 5:
+            # 找对应帖子的图片
+            post_idx = -1
+            if len(parts) >= 6:
+                try:
+                    post_idx = int(re.search(r'\d+', parts[5]).group()) - 1
+                except:
+                    pass
+
+            img_url = ""
+            if 0 <= post_idx < len(posts):
+                img_url = posts[post_idx].get("img", "")
+
             topics.append({
                 "num": len(topics)+1,
                 "cat": parts[0].strip(),
@@ -240,7 +238,7 @@ def select_topics(news_results):
                 "hook": parts[2].strip(),
                 "data": parts[3].strip(),
                 "source": parts[4].strip(),
-                "url": parts[5].strip() if len(parts) >= 6 else "",
+                "img_url": img_url,
             })
         if len(topics) == 6:
             break
@@ -292,24 +290,26 @@ def handle_msg(msg):
     s = get_s(uid)
 
     if text in ["开始","给我今天的内容","今天的内容","/start","/content"]:
-        send(cid, "⚡ 正在扫描中国报、星洲日报、南洋商报、东方日报，请稍等约1分钟...")
+        send(cid, "⚡ 正在打开三家Facebook扫描今日热帖，请稍等约1分钟...")
         def run():
             try:
-                news_results = asyncio.run(scrape_news_with_links())
-                if not news_results:
-                    send(cid, "❌ 扫描失败，请重试")
+                posts = asyncio.run(scrape_fb_posts())
+                if not posts:
+                    send(cid, "❌ Facebook扫描失败，请重试")
                     return
-                total = sum(len(r["articles"]) for r in news_results)
-                send(cid, f"📰 扫描到{total}篇新闻，Claude正在选出6个爆款话题...")
-                topics = select_topics(news_results)
+                send(cid, f"📰 扫描到{len(posts)}条帖子，Claude正在选出6个爆款话题...")
+                topics = select_topics(posts)
                 if not topics:
                     send(cid, "❌ 选题失败，请重试")
                     return
                 s.update({"topics":topics,"captions":[""]*len(topics),
-                          "screenshots":[None]*len(topics),"idx":0,"step":"show_topics"})
+                          "screenshots":[None]*len(topics),
+                          "posts": posts,
+                          "idx":0,"step":"show_topics"})
                 lines = "🗞️ 今日6个爆款话题：\n\n"
                 for t in topics:
-                    lines += f"{t['num']}. {t['cat']} — {t['topic']}\n"
+                    has_img = "🖼️" if t.get("img_url") else "📝"
+                    lines += f"{t['num']}. {has_img} {t['cat']} — {t['topic']}\n"
                 lines += "\n点下面开始逐篇生成 👇"
                 send(cid, lines, {"inline_keyboard":[[
                     {"text":"⚡ 开始逐篇生成","callback_data":"generate"}
@@ -361,19 +361,23 @@ def handle_callback(cb):
         idx = s["idx"]
         t = s["topics"][idx]
         s["step"] = "review_image"
-        send(cid, "📸 正在搜索新闻配图（三重策略），请稍等约30秒...")
+        send(cid, "📸 正在获取Facebook配图...")
         def run():
             try:
-                img = asyncio.run(get_news_image(
-                    t["topic"], t["source"], t.get("url","")
-                ))
-                if img and len(img) > 5000:
+                img_url = t.get("img_url", "")
+                img = None
+                if img_url:
+                    img = download_fb_image(img_url)
+
+                if img:
                     s["screenshots"][idx] = img
-                    r = send_photo_bytes(cid, img, f"🖼️ 配图预览（{t['source']}）")
+                    r = send_photo_bytes(cid, img, f"🖼️ Facebook配图（{t['source']}）")
                     if r.get("ok"):
                         send(cid, "满意就发布 👇", BTN_PUBLISH)
                         return
-                send(cid, "⚠️ 三个策略都找不到配图，直接发布文案？", BTN_PUBLISH)
+
+                # 没有图片就直接问要不要发布
+                send(cid, "⚠️ 未能获取配图，直接发布文案？", BTN_PUBLISH)
             except Exception as e:
                 print(f"配图错误: {e}")
                 send(cid, "⚠️ 配图失败，直接发布文案？", BTN_PUBLISH)
