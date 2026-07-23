@@ -25,7 +25,7 @@ def send_photo_bytes(chat_id, img_bytes, caption, reply_markup=None):
         data["reply_markup"] = json.dumps(reply_markup)
     try:
         return requests.post(f"{BASE}/sendPhoto", data=data,
-            files={"photo": ("news.jpg", img_bytes, "image/jpeg")}, timeout=30).json()
+            files={"photo": ("news.jpg", img_bytes, "image/png")}, timeout=30).json()
     except:
         return {}
 
@@ -34,7 +34,7 @@ def send_channel(img_bytes, caption):
         if img_bytes:
             r = requests.post(f"{BASE}/sendPhoto",
                 data={"chat_id": CHANNEL_ID, "caption": caption},
-                files={"photo": ("news.jpg", img_bytes, "image/jpeg")}, timeout=30).json()
+                files={"photo": ("news.jpg", img_bytes, "image/png")}, timeout=30).json()
             if r.get("ok"):
                 return True
         requests.post(f"{BASE}/sendMessage",
@@ -57,7 +57,7 @@ def ask_claude(prompt, system="", images_b64=None):
         for b64 in images_b64:
             content.append({
                 "type": "image",
-                "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}
+                "source": {"type": "base64", "media_type": "image/png", "data": b64}
             })
     content.append({"type": "text", "text": prompt})
     msg = client.messages.create(
