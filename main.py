@@ -1,4 +1,4 @@
-import os, json, requests, time, anthropic
+import os, json, requests, time, anthropic, re
 from datetime import datetime
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -17,12 +17,11 @@ def send(chat_id, text, reply_markup=None):
         data["reply_markup"] = json.dumps(reply_markup)
     return requests.post(f"{BASE}/sendMessage", json=data).json()
 
-def send_photo_file(chat_id, path, caption, reply_markup=None):
-    data = {"chat_id": chat_id, "caption": caption}
+def send_photo(chat_id, photo_url, caption, reply_markup=None):
+    data = {"chat_id": chat_id, "photo": photo_url, "caption": caption}
     if reply_markup:
         data["reply_markup"] = json.dumps(reply_markup)
-    with open(path, "rb") as f:
-        return requests.post(f"{BASE}/sendPhoto", data=data, files={"photo": f}).json()
+    return requests.post(f"{BASE}/sendPhoto", json=data).json()
 
 def answer_callback(cb_id):
     requests.post(f"{BASE}/answerCallbackQuery", json={"callback_query_id": cb_id})
@@ -35,6 +34,21 @@ def ask_claude(prompt, system=""):
         messages=[{"role": "user", "content": prompt}]
     )
     return msg.content[0].text
+
+def get_og_image(url):
+    """抓取新闻页面的og:image"""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"}
+        r = requests.get(url, headers=headers, timeout=10)
+        match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](https?://[^"\']+)["\']', r.text)
+        if match:
+            return match.group(1)
+        match = re.search(r'<meta[^>]+content=["\'](https?://[^"\']+)["\'][^>]+property=["\']og:image["\']', r.text)
+        if match:
+            return match.group(1)
+    except:
+        pass
+    return None
 
 SYSTEM = """你是Edison Lim (@edison_ttm) 的内容助手，专门为马来西亚华人生成爆款内容。
 
@@ -66,7 +80,7 @@ state = {}
 
 def get_s(uid):
     if uid not in state:
-        state[uid] = {"step": "idle", "topics": [], "captions": [], "idx": 0}
+        state[uid] = {"step": "idle", "topics": [], "captions": [], "images": [], "idx": 0}
     return state[uid]
 
 def gen_topics():
@@ -80,13 +94,17 @@ def gen_topics():
 - 有争议性或情绪共鸣
 - 有具体数据或名人事件
 
+必须提供真实可访问的新闻链接。
+
 只回复JSON数组，不要其他文字：
-[{{"num":1,"cat":"💼 商业","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源"}},
-{{"num":2,"cat":"📊 金融","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源"}},
-{{"num":3,"cat":"🧠 人间清醒","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源"}},
-{{"num":4,"cat":"❤️ 家庭情感","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源"}},
-{{"num":5,"cat":"🧠 人间清醒","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源"}},
-{{"num":6,"cat":"📊 金融","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源"}}]""")
+[
+  {{"num":1,"cat":"💼 商业","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源媒体","url":"https://真实新闻链接"}},
+  {{"num":2,"cat":"📊 金融","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源媒体","url":"https://真实新闻链接"}},
+  {{"num":3,"cat":"🧠 人间清醒","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源媒体","url":"https://真实新闻链接"}},
+  {{"num":4,"cat":"❤️ 家庭情感","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源媒体","url":"https://真实新闻链接"}},
+  {{"num":5,"cat":"🧠 人间清醒","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源媒体","url":"https://真实新闻链接"}},
+  {{"num":6,"cat":"📊 金融","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源媒体","url":"https://真实新闻链接"}}
+]""")
     raw = raw.strip().strip("```json").strip("```").strip()
     return json.loads(raw)
 
@@ -121,14 +139,21 @@ def handle_msg(msg):
         send(cid, "⚡ 正在搜索今日马来西亚热点，请稍等约30秒...")
         try:
             topics = gen_topics()
-            s.update({"topics": topics, "captions": [""]*len(topics), "idx": 0, "step": "show_topics"})
+            s.update({"topics": topics, "captions": [""]*len(topics), "images": [""]*len(topics), "idx": 0, "step": "show_topics"})
+            
+            # 预先抓取所有图片
+            send(cid, "🖼️ 正在抓取新闻配图...")
+            for i, t in enumerate(topics):
+                img = get_og_image(t.get("url", ""))
+                s["images"][i] = img or ""
+            
             lines = "🗞️ 今日6个话题：\n\n"
             for t in topics:
                 lines += f"{t['num']}. {t['cat']} — {t['topic']}\n"
             lines += "\n点下面按钮开始生成文案 👇"
             send(cid, lines, {"inline_keyboard": [[{"text": "⚡ 开始逐篇生成", "callback_data": "generate"}]]})
         except Exception as e:
-            send(cid, f"❌ 搜索失败：{e}\n\n请重试，或者告诉我你想要什么话题")
+            send(cid, f"❌ 搜索失败：{e}\n\n请重试")
         return
 
     if s["step"] == "editing":
@@ -144,7 +169,7 @@ def handle_msg(msg):
         return
 
     if s["step"] == "idle" or text == "/help":
-        send(cid, "👋 你好！发「给我今天的内容」开始生成今日6篇内容 ⚡\n\n或者发「/help」查看所有指令")
+        send(cid, "👋 发「给我今天的内容」开始生成今日6篇 ⚡")
         return
 
 def handle_callback(cb):
@@ -164,6 +189,14 @@ def handle_callback(cb):
             caption = gen_caption(t)
             s["captions"][idx] = caption
             s["step"] = "review_caption"
+            
+            # 显示配图预览
+            img = s["images"][idx]
+            if img:
+                send_photo(cid, img, f"🖼️ 配图预览\n来源：{t['source']}")
+            else:
+                send(cid, f"⚠️ 未能抓到配图（来源：{t['source']}）\n可以手动添加图片")
+            
             send(cid, f"📝 第{t['num']}/6 文案：\n\n{caption}", BTN_CAPTION)
         except Exception as e:
             send(cid, f"❌ 生成失败：{e}")
@@ -171,7 +204,7 @@ def handle_callback(cb):
 
     if data == "caption_ok":
         s["step"] = "review_image"
-        send(cid, "✅ 文案确认！\n\n满意就发布到频道，或者跳过下一篇。", BTN_IMAGE)
+        send(cid, "✅ 文案确认！\n\n图片满意就发布，或者跳到下一篇。", BTN_IMAGE)
         return
 
     if data == "caption_edit":
@@ -183,8 +216,19 @@ def handle_callback(cb):
         idx = s["idx"]
         t = s["topics"][idx]
         caption = s["captions"][idx]
+        img = s["images"][idx]
         try:
-            requests.post(f"{BASE}/sendMessage", json={"chat_id": CHANNEL_ID, "text": caption})
+            if img:
+                # 发图片+文案到频道
+                requests.post(f"{BASE}/sendPhoto", json={
+                    "chat_id": CHANNEL_ID,
+                    "photo": img,
+                    "caption": caption
+                })
+            else:
+                # 只发文案
+                requests.post(f"{BASE}/sendMessage", json={"chat_id": CHANNEL_ID, "text": caption})
+            
             send(cid, f"✅ 第{t['num']}篇已发布到频道！", BTN_NEXT)
             s["step"] = "published"
         except Exception as e:
@@ -199,7 +243,7 @@ def handle_callback(cb):
         else:
             t = s["topics"][s["idx"]]
             s["step"] = "show_topics"
-            send(cid, f"第{t['num']}/6：{t['cat']} — {t['topic']}", 
+            send(cid, f"第{t['num']}/6：{t['cat']} — {t['topic']}",
                  {"inline_keyboard": [[{"text": "⚡ 生成文案", "callback_data": "generate"}]]})
         return
 
@@ -213,7 +257,7 @@ def main():
     offset = 0
     while True:
         try:
-            r = requests.get(f"{BASE}/getUpdates", 
+            r = requests.get(f"{BASE}/getUpdates",
                            params={"offset": offset, "timeout": 30}, timeout=35)
             for u in r.json().get("result", []):
                 offset = u["update_id"] + 1
