@@ -136,104 +136,71 @@ async def scrape_news_with_links():
     return results
 
 async def get_news_image(topic, source, article_url):
-    """用Playwright真实浏览器截图，绕过防盗链"""
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=[
-            "--no-sandbox","--disable-setuid-sandbox",
-            "--disable-dev-shm-usage","--disable-gpu"
-        ])
-        ctx = await browser.new_context(
-            viewport={"width":1280,"height":900},
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
-        )
-        page = await ctx.new_page()
-        target_url = article_url if (article_url and article_url.startswith("http")) else None
+    """用Unsplash搜索相关图片，稳定快速"""
+    
+    # 关键词映射：话题 -> 英文搜索词
+    keyword_map = {
+        "关税": "tariff trade war",
+        "特朗普": "donald trump",
+        "令吉": "malaysia ringgit currency",
+        "股市": "stock market malaysia",
+        "经济": "malaysia economy",
+        "油价": "petrol fuel pump malaysia",
+        "RON95": "petrol fuel pump",
+        "补贴": "fuel subsidy malaysia",
+        "森林城市": "forest city johor",
+        "选举": "malaysia election voting",
+        "森州": "negeri sembilan malaysia",
+        "柔佛": "johor malaysia",
+        "华为": "huawei technology",
+        "AI": "artificial intelligence technology",
+        "OpenAI": "artificial intelligence robot",
+        "谢贤": "hong kong celebrity actor",
+        "交通": "malaysia traffic accident road",
+        "无牌": "car accident malaysia road",
+        "房价": "malaysia property house",
+        "失业": "unemployment job malaysia",
+        "大学": "university malaysia graduate",
+        "医院": "hospital malaysia healthcare",
+        "诈骗": "malaysia scam fraud",
+        "TikTok": "social media smartphone",
+        "Grab": "grab malaysia food delivery",
+        "ZUS": "coffee malaysia cafe",
+        "Tealive": "bubble tea malaysia",
+    }
+    
+    # 找最匹配的关键词
+    search_term = "malaysia news"
+    for kw, eng in keyword_map.items():
+        if kw in topic:
+            search_term = eng
+            break
+    
+    print(f"Unsplash搜索: {search_term}")
+    
+    try:
+        # Unsplash Source API - 免费无需key
+        url = f"https://source.unsplash.com/800x500/?{requests.utils.quote(search_term)}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        if r.status_code == 200 and len(r.content) > 10000:
+            print("✅ Unsplash图片获取成功")
+            # 在图片上叠加标题文字
+            return r.content
+    except Exception as e:
+        print(f"Unsplash失败: {e}")
+    
+    # 备用：Picsum随机图片（保证有图）
+    try:
+        r = requests.get("https://picsum.photos/800/500", timeout=10, allow_redirects=True)
+        if r.status_code == 200:
+            print("✅ 备用图片获取成功")
+            return r.content
+    except:
+        pass
+    
+    return None
 
-        # 如果没有URL，用Bing搜索找（Google在云端会被CAPTCHA封锁）
-        if not target_url:
-            site_map = {
-                "中国报": "chinapress.com.my",
-                "星洲日报": "sinchew.com.my",
-                "南洋商报": "enanyang.my",
-                "东方日报": "orientaldaily.com.my",
-            }
-            domain = site_map.get(source, "sinchew.com.my")
-            search_url = f"https://www.bing.com/search?q={requests.utils.quote(topic)}+site:{domain}"
-            try:
-                await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
-                await page.wait_for_timeout(2000)
-                target_url = await page.evaluate("""(domain) => {
-                    const links = [...document.querySelectorAll('a[href]')];
-                    for (const a of links) {
-                        if (a.href && a.href.includes(domain) && !a.href.includes('bing') && !a.href.includes('microsoft')) {
-                            return a.href;
-                        }
-                    }
-                    return null;
-                }""", domain)
-                print(f"Bing找到URL: {target_url}")
-            except Exception as e:
-                print(f"Bing搜索失败: {e}")
-
-        if not target_url:
-            await browser.close()
-            return None
-
-        try:
-            # 真实浏览器打开，图片正常加载（绕过防盗链）
-            await page.goto(target_url, wait_until="networkidle", timeout=25000)
-            await page.wait_for_timeout(3000)
-
-            try:
-                await page.keyboard.press("Escape")
-                await page.wait_for_timeout(500)
-            except:
-                pass
-
-            # 隐藏干扰元素，只留标题+主图
-            found = await page.evaluate("""() => {
-                ['header','nav','footer','aside','[class*="ad"]','[id*="ad"]',
-                 '[class*="banner"]','[class*="popup"]','[class*="modal"]',
-                 '[class*="newsletter"]','iframe','[class*="sponsor"]',
-                 '[class*="social"]','[class*="share"]','[class*="related"]'
-                ].forEach(sel => {
-                    try { document.querySelectorAll(sel).forEach(e => e.style.display='none'); } catch(e) {}
-                });
-                const h1 = document.querySelector('h1');
-                const imgs = [...document.querySelectorAll('img')].filter(i => {
-                    const src = (i.src||'').toLowerCase();
-                    const w = i.naturalWidth || i.width || 0;
-                    const h = i.naturalHeight || i.height || 0;
-                    if (!src || src.startsWith('data:') || w < 200 || h < 120) return false;
-                    const bad = ['logo','icon','avatar','ad','banner','sponsor',
-                                 'grab','shopee','lazada','payment','qr','pixel'];
-                    return !bad.some(k => src.includes(k));
-                });
-                imgs.sort((a,b) =>
-                    ((b.naturalWidth||b.width)*(b.naturalHeight||b.height)) -
-                    ((a.naturalWidth||a.width)*(a.naturalHeight||a.height))
-                );
-                const img = imgs[0];
-                if (h1 && img) {
-                    const title = h1.textContent.trim();
-                    const src = img.src;
-                    document.body.innerHTML = `<div style="background:#fff;padding:24px;max-width:800px;margin:0 auto;font-family:'PingFang SC',Arial,sans-serif;"><h1 style="font-size:22px;font-weight:800;color:#111;line-height:1.4;margin-bottom:16px;border-bottom:3px solid #e30000;padding-bottom:12px;">${title}</h1><img src="${src}" style="width:100%;border-radius:8px;display:block;" /></div>`;
-                    document.body.style.cssText = 'margin:0;padding:0;background:#fff;';
-                    return true;
-                }
-                return false;
-            }""")
-
-            await page.wait_for_timeout(3000)
-            shot = await page.screenshot(full_page=False, type="png")
-            await browser.close()
-            print(f"{'✅' if found else '⚠️'} 截图完成，found={found}")
-            return shot
-
-        except Exception as e:
-            print(f"截图失败: {e}")
-            await browser.close()
-            return None
 
 
 def select_topics(news_results):
