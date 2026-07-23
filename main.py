@@ -18,7 +18,8 @@ def send_photo(chat_id, photo_url, caption, reply_markup=None):
     data = {"chat_id": chat_id, "photo": photo_url, "caption": caption}
     if reply_markup:
         data["reply_markup"] = json.dumps(reply_markup)
-    return requests.post(f"{BASE}/sendPhoto", json=data, timeout=30).json()
+    r = requests.post(f"{BASE}/sendPhoto", json=data, timeout=30).json()
+    return r
 
 def answer_callback(cb_id):
     requests.post(f"{BASE}/answerCallbackQuery", json={"callback_query_id": cb_id})
@@ -33,47 +34,50 @@ def ask_claude(prompt, system=""):
     return msg.content[0].text
 
 def parse_json(raw):
-    """多种方式尝试解析JSON"""
     raw = raw.strip()
-    # 去掉markdown代码块
     raw = re.sub(r'```json\s*', '', raw)
     raw = re.sub(r'```\s*', '', raw)
     raw = raw.strip()
-    
-    # 直接解析
     try:
         return json.loads(raw)
     except:
         pass
-    
-    # 找到第一个[到最后一个]
     try:
         start = raw.index('[')
         end = raw.rindex(']') + 1
         return json.loads(raw[start:end])
     except:
         pass
-    
-    # 找到第一个{到最后一个}（单个对象）
+    raise ValueError(f"无法解析JSON：{raw[:300]}")
+
+def verify_image(url):
+    """验证图片URL是否可以访问"""
+    if not url or not url.startswith('http'):
+        return False
     try:
-        start = raw.index('{')
-        end = raw.rindex('}') + 1
-        return json.loads(raw[start:end])
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"}
+        r = requests.head(url, headers=headers, timeout=8, allow_redirects=True)
+        ct = r.headers.get('content-type', '')
+        return r.status_code == 200 and ('image' in ct or 'jpeg' in ct or 'png' in ct or 'webp' in ct)
     except:
-        pass
-    
-    raise ValueError(f"无法解析JSON，原始内容：{raw[:200]}")
+        return False
 
 def get_og_image(url):
+    """尝试从网页抓取og:image"""
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"}
         r = requests.get(url, headers=headers, timeout=10)
-        match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](https?://[^"\']+)["\']', r.text)
-        if match:
-            return match.group(1)
-        match = re.search(r'<meta[^>]+content=["\'](https?://[^"\']+)["\'][^>]+property=["\']og:image["\']', r.text)
-        if match:
-            return match.group(1)
+        patterns = [
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](https?://[^"\']+)["\']',
+            r'<meta[^>]+content=["\'](https?://[^"\']+)["\'][^>]+property=["\']og:image["\']',
+            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\'](https?://[^"\']+)["\']',
+        ]
+        for p in patterns:
+            m = re.search(p, r.text)
+            if m:
+                img = m.group(1)
+                if verify_image(img):
+                    return img
     except:
         pass
     return None
@@ -96,7 +100,13 @@ BTN_CAPTION = {"inline_keyboard": [[
 
 BTN_IMAGE = {"inline_keyboard": [[
     {"text": "✅ 发布到频道", "callback_data": "publish"},
-    {"text": "⏭️ 跳过，下一篇", "callback_data": "next"}
+    {"text": "🔄 换一张图", "callback_data": "change_image"},
+    {"text": "⏭️ 跳过下一篇", "callback_data": "next"}
+]]}
+
+BTN_NO_IMAGE = {"inline_keyboard": [[
+    {"text": "✅ 只发文案到频道", "callback_data": "publish"},
+    {"text": "⏭️ 跳过下一篇", "callback_data": "next"}
 ]]}
 
 BTN_NEXT = {"inline_keyboard": [[
@@ -113,18 +123,24 @@ def get_s(uid):
 
 def gen_topics():
     today = datetime.now().strftime("%Y年%m月%d日")
-    prompt = f"""今天是{today}。
-
-找出马来西亚今日最热的6个话题。
+    prompt = f"""今天是{today}。找出马来西亚今日最热的6个话题。
 
 选题标准：有争议性、有数据、贴近马来西亚华人日常。
 
-你必须只回复一个JSON数组，不要有任何其他文字、解释或markdown格式。
-格式如下：
-[{{"num":1,"cat":"💼 商业","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源媒体","url":"https://新闻链接"}},{{"num":2,"cat":"📊 金融","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源媒体","url":"https://新闻链接"}},{{"num":3,"cat":"🧠 人间清醒","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源媒体","url":"https://新闻链接"}},{{"num":4,"cat":"❤️ 家庭情感","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源媒体","url":"https://新闻链接"}},{{"num":5,"cat":"🧠 人间清醒","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源媒体","url":"https://新闻链接"}},{{"num":6,"cat":"📊 金融","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源媒体","url":"https://新闻链接"}}]"""
+重要：url字段必须是真实存在的新闻链接，img_url字段必须是该新闻的真实图片直链URL（.jpg/.png/.webp结尾），可以从新闻网站的og:image获取。
 
+只回复JSON数组，不要任何其他文字：
+[{{"num":1,"cat":"💼 商业","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源媒体","url":"https://新闻链接","img_url":"https://图片直链"}},{{"num":2,"cat":"📊 金融","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源媒体","url":"https://新闻链接","img_url":"https://图片直链"}},{{"num":3,"cat":"🧠 人间清醒","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源媒体","url":"https://新闻链接","img_url":"https://图片直链"}},{{"num":4,"cat":"❤️ 家庭情感","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源媒体","url":"https://新闻链接","img_url":"https://图片直链"}},{{"num":5,"cat":"🧠 人间清醒","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源媒体","url":"https://新闻链接","img_url":"https://图片直链"}},{{"num":6,"cat":"📊 金融","topic":"话题标题","hook":"钩子句","data":"关键数据","source":"来源媒体","url":"https://新闻链接","img_url":"https://图片直链"}}]"""
     raw = ask_claude(prompt)
-    return parse_json(raw)
+    topics = parse_json(raw)
+
+    # 对每个话题验证img_url，如果不行就尝试从url抓og:image
+    for t in topics:
+        img = t.get("img_url", "")
+        if not verify_image(img):
+            og = get_og_image(t.get("url", ""))
+            t["img_url"] = og or ""
+    return topics
 
 def gen_caption(t):
     return ask_claude(f"""话题：{t['topic']}
@@ -133,8 +149,7 @@ def gen_caption(t):
 关键数据：{t['data']}（来源：{t['source']}）
 
 按timtiah结构写200-300字Instagram文案。
-段落之间单行换行，不要空行太多。
-只回复文案本身，不要任何说明。""", SYSTEM)
+段落之间单行换行。只回复文案本身。""", SYSTEM)
 
 def optimize(original, feedback, t):
     return ask_claude(f"""原文案：
@@ -154,20 +169,15 @@ def handle_msg(msg):
     s = get_s(uid)
 
     if text in ["开始", "给我今天的内容", "今天的内容", "/start", "/content"]:
-        send(cid, "⚡ 正在搜索今日马来西亚热点，请稍等约30秒...")
+        send(cid, "⚡ 正在搜索今日马来西亚热点 + 配图，请稍等约40秒...")
         try:
             topics = gen_topics()
-            s.update({"topics": topics, "captions": [""]*len(topics), "images": [""]*len(topics), "idx": 0, "step": "show_topics"})
-
-            send(cid, "🖼️ 正在抓取新闻配图...")
-            for i, t in enumerate(topics):
-                img = get_og_image(t.get("url", ""))
-                s["images"][i] = img or ""
-
+            s.update({"topics": topics, "captions": [""]*len(topics), "idx": 0, "step": "show_topics"})
             lines = "🗞️ 今日6个话题：\n\n"
             for t in topics:
-                lines += f"{t['num']}. {t['cat']} — {t['topic']}\n"
-            lines += "\n点下面按钮开始生成文案 👇"
+                has_img = "🖼️" if t.get("img_url") else "❌"
+                lines += f"{t['num']}. {t['cat']} {has_img} — {t['topic']}\n"
+            lines += "\n🖼️ = 有配图  ❌ = 无配图\n\n点下面按钮开始逐篇生成 👇"
             send(cid, lines, {"inline_keyboard": [[{"text": "⚡ 开始逐篇生成", "callback_data": "generate"}]]})
         except Exception as e:
             send(cid, f"❌ 搜索失败：{e}\n\n请重试")
@@ -175,7 +185,7 @@ def handle_msg(msg):
 
     if s["step"] == "editing":
         t = s["topics"][s["idx"]]
-        send(cid, "✏️ 优化中，请稍等...")
+        send(cid, "✏️ 优化中...")
         try:
             new = optimize(s["captions"][s["idx"]], text, t)
             s["captions"][s["idx"]] = new
@@ -185,8 +195,18 @@ def handle_msg(msg):
             send(cid, f"❌ 优化失败：{e}")
         return
 
+    # 用户发来图片URL
+    if s["step"] == "review_image" and text.startswith("http"):
+        idx = s["idx"]
+        if verify_image(text):
+            s["topics"][idx]["img_url"] = text
+            send_photo(cid, text, "✅ 图片已更新，满意就发布", BTN_IMAGE)
+        else:
+            send(cid, "❌ 这个URL不是有效图片，请发一个直链图片URL（.jpg/.png结尾）")
+        return
+
     if s["step"] == "idle" or text == "/help":
-        send(cid, "👋 发「给我今天的内容」开始生成今日6篇 ⚡")
+        send(cid, "👋 发「给我今天的内容」开始生成今日6篇 ⚡\n\n或者发「/help」查看指令")
         return
 
 def handle_callback(cb):
@@ -201,17 +221,19 @@ def handle_callback(cb):
     if data == "generate":
         idx = s["idx"]
         t = s["topics"][idx]
-        send(cid, f"✍️ 正在生成第{t['num']}/6篇...\n{t['cat']} — {t['topic']}")
+        send(cid, f"✍️ 生成第{t['num']}/6篇：{t['cat']} — {t['topic']}")
         try:
             caption = gen_caption(t)
             s["captions"][idx] = caption
             s["step"] = "review_caption"
 
-            img = s["images"][idx]
+            img = t.get("img_url", "")
             if img:
-                send_photo(cid, img, f"🖼️ 配图预览\n来源：{t['source']}")
+                r = send_photo(cid, img, f"🖼️ 配图（来源：{t['source']}）")
+                if not r.get("ok"):
+                    send(cid, f"⚠️ 配图加载失败，可以发图片URL替换")
             else:
-                send(cid, f"⚠️ 未能抓到配图（来源：{t['source']}）")
+                send(cid, f"⚠️ 暂无配图（来源：{t['source']}）\n\n可以直接发图片URL给我替换")
 
             send(cid, f"📝 第{t['num']}/6 文案：\n\n{caption}", BTN_CAPTION)
         except Exception as e:
@@ -219,8 +241,14 @@ def handle_callback(cb):
         return
 
     if data == "caption_ok":
+        idx = s["idx"]
+        t = s["topics"][idx]
+        img = t.get("img_url", "")
         s["step"] = "review_image"
-        send(cid, "✅ 文案确认！图片满意就发布，或者跳到下一篇。", BTN_IMAGE)
+        if img:
+            send(cid, "✅ 文案确认！图片满意就发布到频道。", BTN_IMAGE)
+        else:
+            send(cid, "✅ 文案确认！\n\n⚠️ 没有配图，可以发图片URL给我，或者直接发布文案。", BTN_NO_IMAGE)
         return
 
     if data == "caption_edit":
@@ -228,21 +256,27 @@ def handle_callback(cb):
         send(cid, "✏️ 告诉我哪里要改：")
         return
 
+    if data == "change_image":
+        s["step"] = "review_image"
+        send(cid, "🔄 发给我新的图片URL（直链，.jpg/.png/.webp结尾）：")
+        return
+
     if data == "publish":
         idx = s["idx"]
         t = s["topics"][idx]
         caption = s["captions"][idx]
-        img = s["images"][idx]
+        img = t.get("img_url", "")
         try:
             if img:
-                requests.post(f"{BASE}/sendPhoto", json={
-                    "chat_id": CHANNEL_ID,
-                    "photo": img,
-                    "caption": caption
-                })
+                r = requests.post(f"{BASE}/sendPhoto", json={
+                    "chat_id": CHANNEL_ID, "photo": img, "caption": caption
+                }, timeout=30).json()
+                if not r.get("ok"):
+                    # 图片发失败，改发文字
+                    requests.post(f"{BASE}/sendMessage", json={"chat_id": CHANNEL_ID, "text": caption})
             else:
                 requests.post(f"{BASE}/sendMessage", json={"chat_id": CHANNEL_ID, "text": caption})
-            send(cid, f"✅ 第{t['num']}篇已发布到频道！", BTN_NEXT)
+            send(cid, f"✅ 第{t['num']}篇已发布！", BTN_NEXT)
             s["step"] = "published"
         except Exception as e:
             send(cid, f"❌ 发布失败：{e}")
