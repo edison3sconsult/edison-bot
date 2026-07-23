@@ -104,11 +104,13 @@ def scrape_fb_with_scrapingbee():
                 timeout=60
             )
             
+            print(f"ScrapingBee状态: {r.status_code}, 长度: {len(r.content)}")
             if r.status_code != 200:
-                print(f"❌ {fb['name']}: {r.status_code}")
+                print(f"❌ {fb['name']}: {r.status_code} - {r.text[:200]}")
                 continue
             
             html = r.text
+            print(f"HTML前300字: {html[:300]}")
             
             # 从HTML提取图片URL (scontent = Facebook CDN图片)
             img_urls = re.findall(r"(https://scontent[^\"'\s]+\.(?:jpg|jpeg|png|webp)(?:[^\"'\s]*)?)", html)
