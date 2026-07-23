@@ -1,5 +1,7 @@
 import os, json, requests, time, anthropic, re, asyncio, threading
 from datetime import datetime
+from PIL import Image, ImageDraw, ImageFont
+import io
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHANNEL_ID = os.environ["CHANNEL_ID"]
@@ -235,6 +237,62 @@ def get_article_image(article_url, topic):
     
     return None
 
+def add_title_to_image(img_bytes, title, source):
+    """在图片上叠加新闻标题和来源"""
+    try:
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        
+        # 调整图片大小
+        img = img.resize((800, 500), Image.LANCZOS)
+        w, h = img.size
+        
+        draw = ImageDraw.Draw(img)
+        
+        # 底部加深色渐变背景
+        overlay = Image.new("RGBA", (w, 200), (0, 0, 0, 0))
+        overlay_draw = ImageDraw.Draw(overlay)
+        for i in range(200):
+            alpha = int(200 * (i / 200))
+            overlay_draw.rectangle([0, i, w, i+1], fill=(0, 0, 0, alpha))
+        img = img.convert("RGBA")
+        img.paste(overlay, (0, h-200), overlay)
+        img = img.convert("RGB")
+        draw = ImageDraw.Draw(img)
+        
+        # 用默认字体（避免字体文件问题）
+        try:
+            font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
+            font_source = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+        except:
+            font_title = ImageFont.load_default()
+            font_source = ImageFont.load_default()
+        
+        # 截断标题
+        max_chars = 24
+        if len(title) > max_chars:
+            line1 = title[:max_chars]
+            line2 = title[max_chars:max_chars*2]
+        else:
+            line1 = title
+            line2 = ""
+        
+        # 画标题（白色）
+        draw.text((20, h-180), line1, font=font_title, fill="white")
+        if line2:
+            draw.text((20, h-145), line2, font=font_title, fill="white")
+        
+        # 画来源（灰色）
+        draw.text((20, h-50), f"来源：{source}", font=font_source, fill="#CCCCCC")
+        
+        # 转回bytes
+        output = io.BytesIO()
+        img.save(output, format="JPEG", quality=90)
+        return output.getvalue()
+        
+    except Exception as e:
+        print(f"叠加标题失败: {e}")
+        return img_bytes
+
 def gen_caption(t):
     return ask_claude(f"""话题：{t['topic']}
 分类：{t['cat']}
@@ -354,6 +412,8 @@ def handle_callback(cb):
             try:
                 img = get_article_image(t.get("url",""), t["topic"])
                 if img:
+                    # 叠加标题到图片
+                    img = add_title_to_image(img, t["topic"], t["source"])
                     s["screenshots"][idx] = img
                     r = send_photo_bytes(cid, img, f"🖼️ 配图预览（{t['source']}）")
                     if r.get("ok"):
