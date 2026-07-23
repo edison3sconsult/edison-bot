@@ -77,17 +77,17 @@ SYSTEM = """你是Edison Lim (@edison_ttm) 的内容助手，专门为马来西�
 
 要求：口语化马来西亚华语、短句有节奏、用「—」分段、200-300字、加hashtag"""
 
-# 新闻网站列表（不需要登录）
 NEWS_SITES = [
-    "https://www.chinapress.com.my",
-    "https://www.sinchew.com.my",
-    "https://www.enanyang.my",
-    "https://www.orientaldaily.com.my",
+    {"name": "中国报", "url": "https://www.chinapress.com.my"},
+    {"name": "星洲日报", "url": "https://www.sinchew.com.my"},
+    {"name": "南洋商报", "url": "https://www.enanyang.my"},
+    {"name": "东方日报", "url": "https://www.orientaldaily.com.my"},
 ]
 
-async def scrape_news():
-    """截图新闻网站首页，拿到今日热点"""
-    shots = []
+async def scrape_news_with_links():
+    """截图新闻网站，同时抓取新闻列表（标题+URL+图片）"""
+    results = []
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=[
             "--no-sandbox","--disable-setuid-sandbox",
@@ -100,10 +100,10 @@ async def scrape_news():
         )
         page = await ctx.new_page()
 
-        for url in NEWS_SITES:
+        for site in NEWS_SITES:
             try:
-                print(f"截图: {url}")
-                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                print(f"扫描: {site['url']}")
+                await page.goto(site["url"], wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(4000)
 
                 # 关闭弹窗
@@ -113,25 +113,51 @@ async def scrape_news():
                 except:
                     pass
 
-                # 截首屏
+                # 截图
                 shot = await page.screenshot(full_page=False, type="png")
-                shots.append({"url": url, "img": shot, "scroll": 0})
 
-                # 滚动截第二屏
-                await page.evaluate("window.scrollBy(0, 700)")
-                await page.wait_for_timeout(2000)
-                shot2 = await page.screenshot(full_page=False, type="png")
-                shots.append({"url": url, "img": shot2, "scroll": 1})
+                # 抓取新闻链接列表
+                articles = await page.evaluate("""() => {
+                    const items = [];
+                    const links = [...document.querySelectorAll('a[href]')];
+                    for (const a of links) {
+                        const href = a.href;
+                        if (!href || href.includes('javascript') || href.includes('#')) continue;
+                        const text = a.innerText?.trim();
+                        if (!text || text.length < 8 || text.length > 200) continue;
+                        // 找附近的图片
+                        const img = a.querySelector('img') ||
+                            a.closest('article,div,li')?.querySelector('img');
+                        const imgSrc = img?.src || '';
+                        if (text && href) {
+                            items.push({title: text, url: href, img: imgSrc});
+                        }
+                    }
+                    // 去重
+                    const seen = new Set();
+                    return items.filter(i => {
+                        if (seen.has(i.url)) return false;
+                        seen.add(i.url);
+                        return true;
+                    }).slice(0, 30);
+                }""")
 
-                print(f"✅ {url} 截图成功")
+                results.append({
+                    "site": site["name"],
+                    "url": site["url"],
+                    "screenshot": shot,
+                    "articles": articles
+                })
+                print(f"✅ {site['name']}: {len(articles)} 篇新闻")
+
             except Exception as e:
-                print(f"❌ {url} 截图失败: {e}")
+                print(f"❌ {site['name']} 失败: {e}")
 
         await browser.close()
-    return shots
+    return results
 
-async def scrape_article(url):
-    """截取文章主图+标题"""
+async def screenshot_article(url):
+    """截取指定URL的新闻主图+标题"""
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=[
             "--no-sandbox","--disable-setuid-sandbox",
@@ -154,8 +180,7 @@ async def scrape_article(url):
                 const title = document.querySelector('h1');
                 const imgs = [...document.querySelectorAll('img')]
                     .filter(i => (i.naturalWidth||i.width)>300 && i.src &&
-                        !i.src.includes('logo') && !i.src.includes('icon') &&
-                        !i.src.includes('avatar'));
+                        !i.src.includes('logo') && !i.src.includes('icon'));
                 imgs.sort((a,b)=>((b.naturalWidth||b.width)*(b.naturalHeight||b.height))-
                     ((a.naturalWidth||a.width)*(a.naturalHeight||a.height)));
                 const img = imgs[0];
@@ -174,33 +199,33 @@ async def scrape_article(url):
         finally:
             await browser.close()
 
-def analyze_news(shots):
-    """Claude分析新闻网站截图，选出6个爆款话题"""
+def select_topics(news_results):
+    """Claude从真实新闻列表里选6个爆款话题"""
     today = datetime.now().strftime("%Y年%m月%d日")
-    # 取前5张截图发给Claude
-    b64s = [base64.standard_b64encode(s["img"]).decode() for s in shots[:5]]
 
-    raw = ask_claude(
-        f"""今天是{today}。以上是马来西亚中文新闻网站（中国报、星洲日报、南洋商报、东方日报）首页的截图。
+    # 整理新闻列表给Claude
+    news_text = f"今天是{today}。以下是马来西亚中文媒体今日新闻列表：\n\n"
+    all_articles = []
+    for r in news_results:
+        news_text += f"【{r['site']}】\n"
+        for i, a in enumerate(r["articles"][:15]):
+            news_text += f"{i+1}. {a['title']} | {a['url']}\n"
+            all_articles.append({**a, "source": r["site"]})
+        news_text += "\n"
 
-请仔细分析截图里出现的新闻标题和内容，找出今日最热、最有爆款潜力的6个话题。
+    news_text += """请从以上新闻中选出6个最有爆款潜力的话题。
 
-选题标准：
-- 有争议性或情绪共鸣
-- 有具体数据或名人事件  
-- 贴近马来西亚华人日常
-- 在多家媒体出现的优先
+选题标准：有争议性、有情绪共鸣、有数据、贴近马来西亚华人日常。
 
-严格按照以下格式回复，每个话题一行，用|||分隔，共6行：
-分类|||话题标题|||钩子句|||关键数据|||来源媒体
+严格按以下格式回复，每行一个话题，用|||分隔，共6行：
+分类|||话题标题|||钩子句|||关键数据|||来源媒体|||新闻URL
 
 分类只能是：💼商业、📊金融、🧠人间清醒、❤️家庭情感
 
-只回复6行，不要任何其他文字。""",
-        images_b64=b64s
-    )
+只回复6行，不要其他文字。"""
 
-    print(f"Claude回复：{raw[:300]}")
+    raw = ask_claude(news_text)
+    print(f"Claude选题回复：\n{raw[:500]}")
 
     topics = []
     for line in raw.strip().split("\n"):
@@ -208,7 +233,7 @@ def analyze_news(shots):
         if not line or "|||" not in line:
             continue
         parts = line.split("|||")
-        if len(parts) >= 5:
+        if len(parts) >= 6:
             topics.append({
                 "num": len(topics)+1,
                 "cat": parts[0].strip(),
@@ -216,6 +241,17 @@ def analyze_news(shots):
                 "hook": parts[2].strip(),
                 "data": parts[3].strip(),
                 "source": parts[4].strip(),
+                "url": parts[5].strip(),
+            })
+        elif len(parts) == 5:
+            topics.append({
+                "num": len(topics)+1,
+                "cat": parts[0].strip(),
+                "topic": parts[1].strip(),
+                "hook": parts[2].strip(),
+                "data": parts[3].strip(),
+                "source": parts[4].strip(),
+                "url": "",
             })
         if len(topics) == 6:
             break
@@ -238,12 +274,6 @@ def optimize(original, feedback, t):
 话题：{t['topic']}
 
 根据反馈优化，保持timtiah结构200-300字，只回复新文案。""", SYSTEM)
-
-def get_article_url(t):
-    url = ask_claude(f"""话题：{t['topic']}，来源：{t['source']}，数据：{t['data']}
-给我这篇马来西亚新闻最可能的真实URL。只回复URL，不要任何其他文字。""")
-    url = url.strip()
-    return url if url.startswith("http") else None
 
 BTN_CAPTION = {"inline_keyboard":[[
     {"text":"✅ 文案满意","callback_data":"caption_ok"},
@@ -277,14 +307,15 @@ def handle_msg(msg):
         send(cid, "⚡ 正在扫描中国报、星洲日报、南洋商报、东方日报，请稍等约1分钟...")
         def run():
             try:
-                shots = asyncio.run(scrape_news())
-                if not shots:
-                    send(cid, "❌ 截图失败，请重试")
+                news_results = asyncio.run(scrape_news_with_links())
+                if not news_results:
+                    send(cid, "❌ 扫描失败，请重试")
                     return
-                send(cid, f"📸 截了{len(shots)}张，Claude正在分析选出6个爆款话题...")
-                topics = analyze_news(shots)
+                total = sum(len(r["articles"]) for r in news_results)
+                send(cid, f"📰 扫描到{total}篇新闻，Claude正在选出6个爆款话题...")
+                topics = select_topics(news_results)
                 if not topics:
-                    send(cid, "❌ 分析失败，请重试")
+                    send(cid, "❌ 选题失败，请重试")
                     return
                 s.update({"topics":topics,"captions":[""]*len(topics),
                           "screenshots":[None]*len(topics),"idx":0,"step":"show_topics"})
@@ -342,13 +373,13 @@ def handle_callback(cb):
         idx = s["idx"]
         t = s["topics"][idx]
         s["step"] = "review_image"
+        article_url = t.get("url", "")
         send(cid, "📸 正在截取新闻配图，请稍等...")
         def run():
             try:
-                url = get_article_url(t)
-                print(f"文章URL: {url}")
-                if url:
-                    img = asyncio.run(scrape_article(url))
+                if article_url and article_url.startswith("http"):
+                    print(f"截图URL: {article_url}")
+                    img = asyncio.run(screenshot_article(article_url))
                     if img:
                         s["screenshots"][idx] = img
                         r = send_photo_bytes(cid, img, f"🖼️ 配图预览（{t['source']}）")
