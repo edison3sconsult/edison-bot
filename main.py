@@ -86,17 +86,7 @@ NEWS_SITES = [
     {"name": "东方日报", "url": "https://www.orientaldaily.com.my"},
 ]
 
-# 排除关键词——广告/logo/无关图片
-EXCLUDE_KEYWORDS = [
-    'logo','icon','avatar','banner','ad','sponsor','grab','shopee',
-    'lazada','tiktok','facebook','youtube','twitter','instagram',
-    'apple','google','whatsapp','telegram','qrcode','qr-code',
-    'payment','pay','wallet','button','gif','pixel','tracker',
-    '1x1','placeholder','blank','loading','spinner'
-]
-
 async def scrape_news_with_links():
-    """截图新闻网站，同时抓取新闻列表"""
     results = []
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=[
@@ -111,7 +101,6 @@ async def scrape_news_with_links():
         page = await ctx.new_page()
         for site in NEWS_SITES:
             try:
-                print(f"扫描: {site['url']}")
                 await page.goto(site["url"], wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(4000)
                 try:
@@ -119,8 +108,6 @@ async def scrape_news_with_links():
                     await page.wait_for_timeout(500)
                 except:
                     pass
-
-                # 抓新闻链接
                 articles = await page.evaluate("""() => {
                     const items = [];
                     const seen = new Set();
@@ -137,20 +124,23 @@ async def scrape_news_with_links():
                     }
                     return items;
                 }""")
-
                 results.append({
                     "site": site["name"],
                     "url": site["url"],
                     "articles": articles
                 })
-                print(f"✅ {site['name']}: {len(articles)} 篇新闻")
+                print(f"✅ {site['name']}: {len(articles)} 篇")
             except Exception as e:
-                print(f"❌ {site['name']} 失败: {e}")
+                print(f"❌ {site['name']}: {e}")
         await browser.close()
     return results
 
-async def screenshot_article(url):
-    """截取文章主图+标题，严格过滤广告图片"""
+async def search_image_for_topic(topic, source):
+    """用Google Images搜索话题相关图片，返回图片bytes"""
+    # 构建搜索关键词（中文+英文）
+    query = f"{topic} {source} Malaysia 2026"
+    search_url = f"https://www.google.com/search?q={requests.utils.quote(query)}&tbm=isch&tbs=qdr:d"
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=[
             "--no-sandbox","--disable-setuid-sandbox",
@@ -162,114 +152,158 @@ async def screenshot_article(url):
         )
         page = await ctx.new_page()
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
             await page.wait_for_timeout(3000)
 
-            # 隐藏广告和无关元素
-            await page.evaluate("""() => {
-                const hideSelectors = [
-                    'header','nav','footer','aside','.sidebar',
-                    '[class*="ad"]','[id*="ad"]','[class*="banner"]',
-                    '[class*="popup"]','[class*="modal"]',
-                    '[class*="newsletter"]','[class*="subscribe"]',
-                    '[class*="social"]','[class*="share"]',
-                    '[class*="related"]','[class*="recommend"]',
-                    'iframe','video','script','style',
-                    '[class*="widget"]','[class*="sponsor"]'
-                ];
-                hideSelectors.forEach(sel => {
-                    try {
-                        document.querySelectorAll(sel).forEach(el => {
-                            el.style.display = 'none';
-                        });
-                    } catch(e) {}
-                });
-            }""")
-
-            # 找标题和主图
-            result = await page.evaluate("""(excludeKeywords) => {
-                const title = document.querySelector('h1');
-                if (!title) return null;
-
-                // 找所有图片，严格过滤
-                const allImgs = [...document.querySelectorAll('img')];
-                const validImgs = allImgs.filter(img => {
-                    const src = (img.src || '').toLowerCase();
-                    const alt = (img.alt || '').toLowerCase();
-                    const cls = (img.className || '').toLowerCase();
-
-                    // 排除无效图片
-                    if (!src || src.startsWith('data:') || src.includes('svg')) return false;
-
-                    // 排除广告关键词
-                    for (const kw of excludeKeywords) {
-                        if (src.includes(kw) || alt.includes(kw) || cls.includes(kw)) return false;
-                    }
-
-                    // 必须有合理尺寸
+            # 找到第一张图片URL
+            img_url = await page.evaluate("""() => {
+                const imgs = [...document.querySelectorAll('img')];
+                const valid = imgs.filter(img => {
+                    const src = img.src || '';
                     const w = img.naturalWidth || img.width || 0;
                     const h = img.naturalHeight || img.height || 0;
-                    if (w < 200 || h < 100) return false;
-
-                    // 宽高比要合理（不是太方或太窄）
-                    const ratio = w / h;
-                    if (ratio < 0.5 || ratio > 4) return false;
-
-                    return true;
+                    return src.startsWith('http') && w > 100 && h > 100 &&
+                           !src.includes('google') && !src.includes('gstatic') &&
+                           !src.includes('logo') && !src.includes('icon');
                 });
+                return valid.length > 0 ? valid[0].src : null;
+            }""")
 
-                // 按面积排序，选最大的
-                validImgs.sort((a, b) => {
-                    const aArea = (a.naturalWidth||a.width) * (a.naturalHeight||a.height);
-                    const bArea = (b.naturalWidth||b.width) * (b.naturalHeight||b.height);
-                    return bArea - aArea;
-                });
+            if img_url:
+                # 下载图片
+                headers = {"User-Agent": "Mozilla/5.0"}
+                r = requests.get(img_url, headers=headers, timeout=10)
+                if r.status_code == 200 and len(r.content) > 5000:
+                    return r.content
 
-                const img = validImgs[0];
-                if (!img) return {title: title.textContent.trim(), imgSrc: null};
-
-                return {
-                    title: title.textContent.trim(),
-                    imgSrc: img.src,
-                    imgW: img.naturalWidth || img.width,
-                    imgH: img.naturalHeight || img.height
-                };
-            }""", EXCLUDE_KEYWORDS)
-
-            if not result:
-                return None
-
-            # 重建页面只显示标题+主图
-            title_text = result.get("title", "")
-            img_src = result.get("imgSrc", "")
-
-            if title_text and img_src:
-                await page.evaluate(f"""() => {{
-                    document.body.innerHTML = `<div style="background:#fff;padding:24px;max-width:800px;margin:0 auto;font-family:'PingFang SC',sans-serif;">
-                        <h1 style="font-size:22px;font-weight:800;color:#111;margin-bottom:16px;border-bottom:3px solid #e30000;padding-bottom:12px;">{title_text}</h1>
-                        <img src="{img_src}" style="width:100%;border-radius:8px;display:block;" /></div>`;
-                    document.body.style.cssText='margin:0;padding:0;background:#fff;';
-                }}""")
-                await page.wait_for_timeout(2000)
-            elif title_text:
-                await page.evaluate(f"""() => {{
-                    document.body.innerHTML = `<div style="background:#fff;padding:24px;max-width:800px;margin:0 auto;font-family:'PingFang SC',sans-serif;">
-                        <h1 style="font-size:22px;font-weight:800;color:#111;margin-bottom:16px;border-bottom:3px solid #e30000;padding-bottom:12px;">{title_text}</h1>
-                        <p style="color:#666;font-size:16px;">（暂无主图）</p></div>`;
-                    document.body.style.cssText='margin:0;padding:0;background:#fff;';
-                }}""")
-                await page.wait_for_timeout(1000)
-
+            # 如果Google Images没找到，截图整个搜索结果页
+            # 只留前几张图片区域
+            await page.evaluate("""() => {
+                document.querySelectorAll('header,footer,nav,[role="navigation"]').forEach(e => e.style.display='none');
+            }""")
             return await page.screenshot(full_page=False, type="png")
 
         except Exception as e:
-            print(f"文章截图失败: {e}")
+            print(f"图片搜索失败: {e}")
             return None
         finally:
             await browser.close()
 
+async def get_news_image(topic, source, article_url):
+    """多重策略获取配图"""
+
+    # 策略1：直接从新闻URL抓og:image
+    if article_url and article_url.startswith("http"):
+        try:
+            headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+            r = requests.get(article_url, headers=headers, timeout=10)
+            if r.status_code == 200:
+                # 找og:image
+                matches = re.findall(
+                    r'<meta[^>]+(?:property=["\']og:image["\']|name=["\']twitter:image["\'])[^>]+content=["\'](https?://[^"\'>\s]+)["\']',
+                    r.text
+                )
+                if not matches:
+                    matches = re.findall(
+                        r'content=["\'](https?://[^"\'>\s]+\.(jpg|jpeg|png|webp))["\']',
+                        r.text
+                    )
+                for img_url in matches[:3]:
+                    if isinstance(img_url, tuple):
+                        img_url = img_url[0]
+                    # 排除广告
+                    if any(kw in img_url.lower() for kw in ['ad','banner','logo','icon','sponsor']):
+                        continue
+                    img_r = requests.get(img_url, headers=headers, timeout=8)
+                    if img_r.status_code == 200 and len(img_r.content) > 10000:
+                        print(f"✅ 策略1成功: {img_url[:60]}")
+                        return img_r.content
+        except Exception as e:
+            print(f"策略1失败: {e}")
+
+    # 策略2：Google Images搜索
+    try:
+        print(f"策略2: Google Images搜索 {topic}")
+        img = await search_image_for_topic(topic, source)
+        if img and len(img) > 5000:
+            print("✅ 策略2成功")
+            return img
+    except Exception as e:
+        print(f"策略2失败: {e}")
+
+    # 策略3：截取新闻网站搜索结果
+    try:
+        site_map = {
+            "中国报": "chinapress.com.my",
+            "星洲日报": "sinchew.com.my",
+            "南洋商报": "enanyang.my",
+            "东方日报": "orientaldaily.com.my",
+        }
+        domain = site_map.get(source, "sinchew.com.my")
+        search_url = f"https://www.google.com/search?q={requests.utils.quote(topic)}+site:{domain}"
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=[
+                "--no-sandbox","--disable-setuid-sandbox",
+                "--disable-dev-shm-usage","--disable-gpu"
+            ])
+            ctx = await browser.new_context(viewport={"width":1280,"height":900},
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+            page = await ctx.new_page()
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
+            await page.wait_for_timeout(2000)
+
+            # 点第一个结果
+            first_link = await page.evaluate("""() => {
+                const links = [...document.querySelectorAll('a[href]')];
+                for (const a of links) {
+                    if (a.href && a.href.includes('chinapress') ||
+                        a.href && a.href.includes('sinchew') ||
+                        a.href && a.href.includes('enanyang') ||
+                        a.href && a.href.includes('orientaldaily')) {
+                        return a.href;
+                    }
+                }
+                return null;
+            }""")
+
+            if first_link:
+                await page.goto(first_link, wait_until="domcontentloaded", timeout=15000)
+                await page.wait_for_timeout(2000)
+
+                # 简化页面只留主图和标题
+                await page.evaluate("""() => {
+                    ['header','nav','footer','aside','[class*="ad"]','[id*="ad"]',
+                     'iframe','[class*="popup"]','[class*="banner"]'].forEach(sel => {
+                        document.querySelectorAll(sel).forEach(e => e.style.display='none');
+                    });
+                    const h1 = document.querySelector('h1');
+                    const imgs = [...document.querySelectorAll('img')]
+                        .filter(i => (i.naturalWidth||i.width)>300 && (i.naturalHeight||i.height)>150
+                            && i.src && !i.src.includes('logo') && !i.src.includes('ad'));
+                    imgs.sort((a,b)=>((b.naturalWidth||b.width)*(b.naturalHeight||b.height))-
+                        ((a.naturalWidth||a.width)*(a.naturalHeight||a.height)));
+                    const img = imgs[0];
+                    if (h1 && img) {
+                        document.body.innerHTML = `<div style="background:#fff;padding:20px;max-width:800px;margin:0 auto;">
+                            <h1 style="font-size:22px;font-weight:800;color:#111;border-bottom:3px solid #e30000;padding-bottom:10px;margin-bottom:14px;">${h1.textContent.trim()}</h1>
+                            <img src="${img.src}" style="width:100%;border-radius:8px;" /></div>`;
+                        document.body.style.cssText='margin:0;padding:0;background:#fff;';
+                    }
+                }""")
+                await page.wait_for_timeout(2000)
+                shot = await page.screenshot(full_page=False, type="png")
+                await browser.close()
+                print("✅ 策略3成功")
+                return shot
+
+            await browser.close()
+    except Exception as e:
+        print(f"策略3失败: {e}")
+
+    return None
+
 def select_topics(news_results):
-    """Claude从真实新闻列表选6个爆款话题"""
     today = datetime.now().strftime("%Y年%m月%d日")
     news_text = f"今天是{today}。以下是马来西亚中文媒体今日新闻列表：\n\n"
     for r in news_results:
@@ -427,23 +461,22 @@ def handle_callback(cb):
         idx = s["idx"]
         t = s["topics"][idx]
         s["step"] = "review_image"
-        article_url = t.get("url", "")
-        send(cid, "📸 正在截取新闻配图，请稍等...")
+        send(cid, "📸 正在搜索新闻配图（三重策略），请稍等约30秒...")
         def run():
             try:
-                if article_url and article_url.startswith("http"):
-                    print(f"截图URL: {article_url}")
-                    img = asyncio.run(screenshot_article(article_url))
-                    if img:
-                        s["screenshots"][idx] = img
-                        r = send_photo_bytes(cid, img, f"🖼️ 配图预览（{t['source']}）")
-                        if r.get("ok"):
-                            send(cid, "满意就发布 👇", BTN_PUBLISH)
-                            return
-                send(cid, "⚠️ 未能截到配图，直接发布文案？", BTN_PUBLISH)
+                img = asyncio.run(get_news_image(
+                    t["topic"], t["source"], t.get("url","")
+                ))
+                if img and len(img) > 5000:
+                    s["screenshots"][idx] = img
+                    r = send_photo_bytes(cid, img, f"🖼️ 配图预览（{t['source']}）")
+                    if r.get("ok"):
+                        send(cid, "满意就发布 👇", BTN_PUBLISH)
+                        return
+                send(cid, "⚠️ 三个策略都找不到配图，直接发布文案？", BTN_PUBLISH)
             except Exception as e:
-                print(f"截图错误: {e}")
-                send(cid, "⚠️ 截图失败，直接发布文案？", BTN_PUBLISH)
+                print(f"配图错误: {e}")
+                send(cid, "⚠️ 配图失败，直接发布文案？", BTN_PUBLISH)
         threading.Thread(target=run, daemon=True).start()
         return
 
