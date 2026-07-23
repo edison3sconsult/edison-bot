@@ -111,14 +111,14 @@ def scrape_fb_with_scrapingbee():
             html = r.text
             
             # 从HTML提取图片URL (scontent = Facebook CDN图片)
-            img_urls = re.findall(r'(https://scontent[^"'\s]+\.(?:jpg|jpeg|png|webp)(?:[^"'\s]*)?)', html)
+            img_urls = re.findall(r"(https://scontent[^\"'\s]+\.(?:jpg|jpeg|png|webp)(?:[^\"'\s]*)?)", html)
             
             # 提取文字内容
             texts = re.findall(r'"message":\{"text":"([^"]{20,300})"', html)
             if not texts:
                 # 备用：找中文内容
-                texts = re.findall(r'[一-鿿][^
-<"]{20,200}', html)
+                texts = re.findall(r"[\u4e00-\u9fff][^\n<\"]{20,200}", html)
+
             
             print(f"✅ {fb['name']}: {len(img_urls)}张图, {len(texts)}条文字")
             
@@ -193,7 +193,7 @@ def search_google_image(topic):
             return None
             
         # 找图片URL
-        urls = re.findall(r'(https://[^"'\s]+\.(?:jpg|jpeg|png|webp))', r.text)
+        urls = re.findall(r'(https://[^"\s]+\.(?:jpg|jpeg|png|webp))', r.text)
         urls = [u for u in urls if not any(k in u for k in ['google','gstatic','logo','icon'])]
         
         if urls:
@@ -243,7 +243,7 @@ async def scrape_fb_posts():
     """兼容接口，实际用ScrapingBee"""
     return scrape_fb_with_scrapingbee()
 
-def def download_fb_image(img_url):
+def download_fb_image(img_url):
     """下载Facebook帖子图片"""
     if not img_url:
         return None
