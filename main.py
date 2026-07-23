@@ -123,6 +123,8 @@ def scrape_fb_with_scrapingbee():
 
             
             print(f"✅ {fb['name']}: {len(img_urls)}张图, {len(texts)}条文字")
+            if img_urls:
+                print(f"第一张图URL: {img_urls[0][:150]}")
             
             # 配对文字和图片
             for i, text in enumerate(texts[:10]):
@@ -139,38 +141,34 @@ def scrape_fb_with_scrapingbee():
     return all_posts
 
 def download_image_scrapingbee(img_url):
-    """用ScrapingBee下载图片"""
+    """下载图片"""
     if not img_url:
         return None
-    try:
-        # 先直接试下载（Facebook CDN图片有时可以直接下）
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-            "Referer": "https://www.facebook.com/",
-        }
-        r = requests.get(img_url, headers=headers, timeout=15)
-        if r.status_code == 200 and len(r.content) > 5000:
-            print(f"✅ 直接下载成功")
-            return r.content
-    except:
-        pass
+    print(f"尝试下载: {img_url[:100]}")
+    
+    # 清理URL中的HTML实amp;
+    img_url = img_url.replace("&amp;", "&")
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
+        "Referer": "https://www.facebook.com/",
+        "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Sec-Fetch-Dest": "image",
+        "Sec-Fetch-Mode": "no-cors",
+        "Sec-Fetch-Site": "cross-site",
+    }
     
     try:
-        # 用ScrapingBee下载
-        r = requests.get(
-            "https://app.scrapingbee.com/api/v1/",
-            params={
-                "api_key": SCRAPINGBEE_KEY,
-                "url": img_url,
-                "render_js": "false",
-            },
-            timeout=30
-        )
+        r = requests.get(img_url, headers=headers, timeout=20, allow_redirects=True)
+        print(f"下载状态: {r.status_code}, 大小: {len(r.content)}, 类型: {r.headers.get('content-type','')}")
         if r.status_code == 200 and len(r.content) > 5000:
-            print(f"✅ ScrapingBee下载成功")
-            return r.content
+            ct = r.headers.get('content-type', '')
+            if 'image' in ct or 'jpeg' in ct or 'png' in ct or 'webp' in ct:
+                print("✅ 直接下载成功")
+                return r.content
     except Exception as e:
-        print(f"图片下载失败: {e}")
+        print(f"直接下载失败: {e}")
     
     return None
 
