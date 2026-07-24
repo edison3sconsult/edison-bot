@@ -77,47 +77,56 @@ async def scan_facebook():
                 print(f"扫描: {fb['url']}")
                 await page.goto(fb["url"], wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(6000)
-                for _ in range(3):
-                    await page.evaluate("window.scrollBy(0, 600)")
+                for _ in range(4):
+                    await page.evaluate("window.scrollBy(0, 700)")
                     await page.wait_for_timeout(2000)
 
-                # 简单JS：只找链接，不做复杂操作
-                post_links = await page.evaluate(
-                    "Array.from(document.querySelectorAll('a'))"
-                    ".filter(a=>a.href&&(a.href.indexOf('/posts/')>-1||a.href.indexOf('/permalink/')>-1))"
-                    ".map(a=>a.href)"
-                    ".filter(function(v,i,s){return s.indexOf(v)===i;})"
-                    ".slice(0,15)"
-                )
+                # 只用inner_text，完全不用复杂JS
+                body_text = await page.inner_text("body")
+                
+                # 找所有帖子链接 - 用locator不用evaluate
+                all_links = page.locator("a")
+                count = await all_links.count()
+                
+                post_urls = []
+                news_urls = []
+                
+                for i in range(min(count, 200)):
+                    try:
+                        href = await all_links.nth(i).get_attribute("href") or ""
+                        if "/posts/" in href or "/permalink/" in href:
+                            if href not in post_urls:
+                                post_urls.append(href)
+                        if any(d in href for d in ["sinchew","chinapress","enanyang","orientaldaily"]):
+                            if href not in news_urls:
+                                news_urls.append(href)
+                    except:
+                        continue
 
-                news_links = await page.evaluate(
-                    "Array.from(document.querySelectorAll('a'))"
-                    ".filter(a=>a.href&&(a.href.indexOf('sinchew')>-1||a.href.indexOf('chinapress')>-1||a.href.indexOf('enanyang')>-1||a.href.indexOf('orientaldaily')>-1))"
-                    ".map(a=>a.href)"
-                    ".filter(function(v,i,s){return s.indexOf(v)===i;})"
-                    ".slice(0,15)"
-                )
+                # 从页面文字提取新闻段落
+                nl = chr(10)
+                lines = [l.strip() for l in body_text.split(nl) if len(l.strip()) > 15]
+                
+                # 找中文内容段落
+                chinese_lines = [l for l in lines if any('一' <= c <= '鿿' for c in l)]
+                
+                print(f"✅ {fb['name']}: {len(post_urls)}条帖子链接, {len(chinese_lines)}条中文内容")
+                
+                for i, post_url in enumerate(post_urls[:12]):
+                    text = " ".join(chinese_lines[i*2:(i*2)+2]) if i*2 < len(chinese_lines) else ""
+                    news_url = news_urls[i] if i < len(news_urls) else ""
+                    if text or news_url:
+                        all_posts.append({
+                            "source": fb["name"],
+                            "post_url": post_url,
+                            "text": text[:250],
+                            "news_url": news_url,
+                            "total": 0
+                        })
 
-                # 获取页面文字
-                page_text = await page.inner_text("body")
-                newline = chr(10)
-                lines = [l.strip() for l in page_text.split(newline) if len(l.strip()) > 20]
-
-                for i, post_url in enumerate(post_links[:12]):
-                    text_chunk = " ".join(lines[i*3:(i*3)+3]) if i*3 < len(lines) else ""
-                    news_url = news_links[i] if i < len(news_links) else ""
-                    all_posts.append({
-                        "source": fb["name"],
-                        "post_url": post_url,
-                        "text": text_chunk[:250],
-                        "news_url": news_url,
-                        "likes": 0,
-                        "comments": 0,
-                        "total": 0
-                    })
-                print(f"✅ {fb['name']}: {len(post_links)} 条")
             except Exception as e:
                 print(f"❌ {fb['name']}: {e}")
+        
         await browser.close()
     return all_posts
 
@@ -158,8 +167,11 @@ def select_6_topics(posts):
 
 只回复6行，不要任何其他文字。"""
     
+    print(f"发给Claude的内容长度: {len(text)}")
+    print(f"帖子数量: {len(posts)}")
     raw = ask_claude(text)
-    print(f"Claude选题：\n{raw[:600]}")
+    print(f"Claude回复长度: {len(raw)}")
+    print(f"Claude完整回复:\n{raw}")
     
     topics = []
     for line in raw.strip().split("\n"):
