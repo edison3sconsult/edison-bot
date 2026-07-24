@@ -86,84 +86,51 @@ async def scan_facebook():
                     await page.wait_for_timeout(2000)
                 
                 # 找帖子：文字+直链+互动数
-                posts = await page.evaluate("""() => {
+                js_code = '''() => {
                     const results = [];
                     const seen = new Set();
-                    
-                    // 找所有帖子容器
                     const articles = document.querySelectorAll('[role="article"]');
-                    
                     articles.forEach(container => {
-                        // 找帖子直链
                         const postLink = container.querySelector('a[href*="/posts/"], a[href*="/permalink/"]');
                         if (!postLink) return;
-                        
                         const href = postLink.href;
                         if (seen.has(href)) return;
                         seen.add(href);
-                        
-                        // 找文字内容
                         const allText = container.innerText || '';
-                        const lines = allText.split('\n').filter(l => l.trim().length > 10);
-                        const text = lines.slice(0, 5).join(' ').trim().slice(0, 250);
-                        
-                        // 找新闻链接
+                        const lines = allText.split("\n").filter(l => l.trim().length > 10);
+                        const text = lines.slice(0, 5).join(" ").trim().slice(0, 250);
                         const newsLinks = [...container.querySelectorAll('a[href]')]
                             .map(l => l.href)
-                            .filter(h => h.includes('sinchew') || h.includes('chinapress') || 
+                            .filter(h => h.includes('sinchew') || h.includes('chinapress') ||
                                         h.includes('enanyang') || h.includes('orientaldaily') ||
                                         h.includes('malaymail') || h.includes('thestar'));
-                        
-                        // 抓互动数（like/comment/share数字）
-                        let likes = 0, comments = 0, shares = 0;
-                        const allNums = allText.match(/\d[\d,]*/g) || [];
-                        
-                        // Facebook通常格式：数字K 或 纯数字
-                        const interactionEl = container.querySelectorAll('span[aria-hidden="true"], div[role="button"]');
-                        interactionEl.forEach(el => {
-                            const t = el.innerText || '';
-                            const num = parseFloat(t.replace(',','').replace('K','000').replace('k','000'));
-                            if (!isNaN(num) && num > 0 && num < 1000000) {
-                                if (likes === 0) likes = num;
-                                else if (comments === 0) comments = num;
-                                else if (shares === 0) shares = num;
+                        let likes = 0, comments = 0;
+                        const spans = [...container.querySelectorAll('span')];
+                        spans.forEach(s => {
+                            const t = (s.innerText || "").trim();
+                            const cleaned = t.replace(/,/g, "").replace(/K$/i, "000");
+                            const n = parseFloat(cleaned);
+                            if (!isNaN(n) && n > 0 && n < 500000 && /^[0-9]+/.test(t)) {
+                                if (likes === 0) likes = n;
+                                else if (comments === 0) comments = n;
                             }
                         });
-                        
-                        // 备用：找包含数字的span
-                        if (likes === 0) {
-                            const spans = [...container.querySelectorAll('span')];
-                            spans.forEach(s => {
-                                const t = (s.innerText||'').trim();
-                                if (/^[\d,\.]+K?$/.test(t)) {
-                                    const n = parseFloat(t.replace(',','').replace('K','000'));
-                                    if (n > 0 && n < 500000) {
-                                        if (likes === 0) likes = n;
-                                        else if (comments === 0) comments = n;
-                                    }
-                                }
-                            });
-                        }
-                        
-                        const total_engagement = likes + comments * 3 + shares * 5;
-                        
+                        const total = likes + comments * 3;
                         if (text.length > 15) {
                             results.push({
                                 post_url: href,
                                 text: text,
-                                news_url: newsLinks[0] || '',
+                                news_url: newsLinks[0] || "",
                                 likes: Math.round(likes),
                                 comments: Math.round(comments),
-                                shares: Math.round(shares),
-                                total: Math.round(total_engagement)
+                                total: Math.round(total)
                             });
                         }
                     });
-                    
-                    // 按互动数排序
                     results.sort((a, b) => b.total - a.total);
                     return results.slice(0, 20);
-                }""")
+                }'''
+                posts = await page.evaluate(js_code)
                 
                 for p in posts:
                     p["source"] = fb["name"]
