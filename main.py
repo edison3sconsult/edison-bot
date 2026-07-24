@@ -85,52 +85,40 @@ async def scan_facebook():
                     await page.evaluate("window.scrollBy(0, 600)")
                     await page.wait_for_timeout(2000)
                 
-                # 找帖子：文字+直链+互动数
-                js_code = '''() => {
-                    const results = [];
-                    const seen = new Set();
-                    const articles = document.querySelectorAll('[role="article"]');
-                    articles.forEach(container => {
-                        const postLink = container.querySelector('a[href*="/posts/"], a[href*="/permalink/"]');
-                        if (!postLink) return;
-                        const href = postLink.href;
-                        if (seen.has(href)) return;
-                        seen.add(href);
-                        const allText = container.innerText || '';
-                        const lines = allText.split("\n").filter(l => l.trim().length > 10);
-                        const text = lines.slice(0, 5).join(" ").trim().slice(0, 250);
-                        const newsLinks = [...container.querySelectorAll('a[href]')]
-                            .map(l => l.href)
-                            .filter(h => h.includes('sinchew') || h.includes('chinapress') ||
-                                        h.includes('enanyang') || h.includes('orientaldaily') ||
-                                        h.includes('malaymail') || h.includes('thestar'));
-                        let likes = 0, comments = 0;
-                        const spans = [...container.querySelectorAll('span')];
-                        spans.forEach(s => {
-                            const t = (s.innerText || "").trim();
-                            const cleaned = t.replace(/,/g, "").replace(/K$/i, "000");
-                            const n = parseFloat(cleaned);
-                            if (!isNaN(n) && n > 0 && n < 500000 && /^[0-9]+/.test(t)) {
-                                if (likes === 0) likes = n;
-                                else if (comments === 0) comments = n;
-                            }
-                        });
-                        const total = likes + comments * 3;
-                        if (text.length > 15) {
-                            results.push({
-                                post_url: href,
-                                text: text,
-                                news_url: newsLinks[0] || "",
-                                likes: Math.round(likes),
-                                comments: Math.round(comments),
-                                total: Math.round(total)
-                            });
-                        }
-                    });
-                    results.sort((a, b) => b.total - a.total);
-                    return results.slice(0, 20);
-                }'''
-                posts = await page.evaluate(js_code)
+                # 找帖子
+                posts = await page.evaluate(
+                    "(function(){"
+                    "var results=[];"
+                    "var seen={};"
+                    "var arts=document.querySelectorAll('[role=\"article\"]');"
+                    "for(var i=0;i<arts.length;i++){"
+                    "  var c=arts[i];"
+                    "  var a=c.querySelector('a[href*="/posts/"],a[href*=\"/permalink/\"]');"
+                    "  if(!a)continue;"
+                    "  var h=a.href;"
+                    "  if(seen[h])continue;"
+                    "  seen[h]=1;"
+                    "  var txt=(c.innerText||'').slice(0,300);"
+                    "  var nlink='';"
+                    "  var als=c.querySelectorAll('a[href]');"
+                    "  for(var j=0;j<als.length;j++){"
+                    "    var ah=als[j].href||'';"
+                    "    if(ah.indexOf('sinchew')>-1||ah.indexOf('chinapress')>-1||ah.indexOf('enanyang')>-1||ah.indexOf('orientaldaily')>-1){nlink=ah;break;}"
+                    "  }"
+                    "  var lk=0,cm=0;"
+                    "  var sps=c.querySelectorAll('span');"
+                    "  for(var k=0;k<sps.length;k++){"
+                    "    var st=(sps[k].innerText||'').trim();"
+                    "    var sc=st.replace(/,/g,'').replace(/K$/i,'000');"
+                    "    var n=parseFloat(sc);"
+                    "    if(!isNaN(n)&&n>0&&n<500000&&/^[0-9]/.test(st)){if(lk===0)lk=n;else if(cm===0)cm=n;}"
+                    "  }"
+                    "  if(txt.length>15)results.push({post_url:h,text:txt,news_url:nlink,likes:Math.round(lk),comments:Math.round(cm),total:Math.round(lk+cm*3)});"
+                    "}"
+                    "results.sort(function(a,b){return b.total-a.total;});"
+                    "return results.slice(0,20);"
+                    "})()"
+                )
                 
                 for p in posts:
                     p["source"] = fb["name"]
