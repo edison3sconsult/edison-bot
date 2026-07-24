@@ -55,85 +55,72 @@ SYSTEM = """你是Edison Lim (@edison_ttm) 的内容助手，专门为马来西�
 
 # ── Playwright 扫Facebook ────────────────────────────
 async def scan_facebook():
-    """扫描三家Facebook，返回帖子列表（含直链）"""
     FB_PAGES = [
         {"name": "星洲日报", "url": "https://www.facebook.com/SinChewDaily"},
         {"name": "中国报", "url": "https://www.facebook.com/ChinaPressMY"},
         {"name": "南洋商报", "url": "https://www.facebook.com/nanyang.nysp"},
     ]
-    
     all_posts = []
-    
     async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp("http://localhost:9222") if False else \
-                  await p.chromium.launch(headless=True, args=[
-                      "--no-sandbox","--disable-setuid-sandbox",
-                      "--disable-dev-shm-usage","--disable-gpu"
-                  ])
+        browser = await p.chromium.launch(headless=True, args=[
+            "--no-sandbox","--disable-setuid-sandbox",
+            "--disable-dev-shm-usage","--disable-gpu"
+        ])
         ctx = await browser.new_context(
             viewport={"width":1280,"height":900},
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
             locale="zh-CN"
         )
         page = await ctx.new_page()
-        
         for fb in FB_PAGES:
             try:
                 print(f"扫描: {fb['url']}")
                 await page.goto(fb["url"], wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(6000)
-                
-                # 滚动加载帖子
                 for _ in range(3):
                     await page.evaluate("window.scrollBy(0, 600)")
                     await page.wait_for_timeout(2000)
-                
-                # 找帖子
-                posts = await page.evaluate(
-                    "(function(){"
-                    "var results=[];"
-                    "var seen={};"
-                    "var arts=document.querySelectorAll('[role=\"article\"]');"
-                    "for(var i=0;i<arts.length;i++){"
-                    "  var c=arts[i];"
-                    "  var a=c.querySelector('a[href*="/posts/"],a[href*=\"/permalink/\"]');"
-                    "  if(!a)continue;"
-                    "  var h=a.href;"
-                    "  if(seen[h])continue;"
-                    "  seen[h]=1;"
-                    "  var txt=(c.innerText||'').slice(0,300);"
-                    "  var nlink='';"
-                    "  var als=c.querySelectorAll('a[href]');"
-                    "  for(var j=0;j<als.length;j++){"
-                    "    var ah=als[j].href||'';"
-                    "    if(ah.indexOf('sinchew')>-1||ah.indexOf('chinapress')>-1||ah.indexOf('enanyang')>-1||ah.indexOf('orientaldaily')>-1){nlink=ah;break;}"
-                    "  }"
-                    "  var lk=0,cm=0;"
-                    "  var sps=c.querySelectorAll('span');"
-                    "  for(var k=0;k<sps.length;k++){"
-                    "    var st=(sps[k].innerText||'').trim();"
-                    "    var sc=st.replace(/,/g,'').replace(/K$/i,'000');"
-                    "    var n=parseFloat(sc);"
-                    "    if(!isNaN(n)&&n>0&&n<500000&&/^[0-9]/.test(st)){if(lk===0)lk=n;else if(cm===0)cm=n;}"
-                    "  }"
-                    "  if(txt.length>15)results.push({post_url:h,text:txt,news_url:nlink,likes:Math.round(lk),comments:Math.round(cm),total:Math.round(lk+cm*3)});"
-                    "}"
-                    "results.sort(function(a,b){return b.total-a.total;});"
-                    "return results.slice(0,20);"
-                    "})()"
+
+                # 简单JS：只找链接，不做复杂操作
+                post_links = await page.evaluate(
+                    "Array.from(document.querySelectorAll('a'))"
+                    ".filter(a=>a.href&&(a.href.indexOf('/posts/')>-1||a.href.indexOf('/permalink/')>-1))"
+                    ".map(a=>a.href)"
+                    ".filter(function(v,i,s){return s.indexOf(v)===i;})"
+                    ".slice(0,15)"
                 )
-                
-                for p in posts:
-                    p["source"] = fb["name"]
-                all_posts.extend(posts)
-                print(f"✅ {fb['name']}: {len(posts)} 条帖子")
-                
+
+                news_links = await page.evaluate(
+                    "Array.from(document.querySelectorAll('a'))"
+                    ".filter(a=>a.href&&(a.href.indexOf('sinchew')>-1||a.href.indexOf('chinapress')>-1||a.href.indexOf('enanyang')>-1||a.href.indexOf('orientaldaily')>-1))"
+                    ".map(a=>a.href)"
+                    ".filter(function(v,i,s){return s.indexOf(v)===i;})"
+                    ".slice(0,15)"
+                )
+
+                # 获取页面文字
+                page_text = await page.inner_text("body")
+                newline = chr(10)
+                lines = [l.strip() for l in page_text.split(newline) if len(l.strip()) > 20]
+
+                for i, post_url in enumerate(post_links[:12]):
+                    text_chunk = " ".join(lines[i*3:(i*3)+3]) if i*3 < len(lines) else ""
+                    news_url = news_links[i] if i < len(news_links) else ""
+                    all_posts.append({
+                        "source": fb["name"],
+                        "post_url": post_url,
+                        "text": text_chunk[:250],
+                        "news_url": news_url,
+                        "likes": 0,
+                        "comments": 0,
+                        "total": 0
+                    })
+                print(f"✅ {fb['name']}: {len(post_links)} 条")
             except Exception as e:
                 print(f"❌ {fb['name']}: {e}")
-        
         await browser.close()
-    
     return all_posts
+
 
 def select_6_topics(posts):
     """按互动数排序，让Claude cross-check选出10小时内最爆的6个话题"""
