@@ -115,11 +115,16 @@ async def scan_facebook():
                                         h.includes('malaymail') || h.includes('thestar') ||
                                         h.includes('focusmalaysia'));
                         
+                        // 找时间
+                        const timeEl = container?.querySelector('abbr, [data-utime], span[id*="jsc"]');
+                        const timeText = timeEl?.getAttribute('title') || timeEl?.innerText || '';
+                        
                         if (text.length > 15 || newsLinks.length > 0) {
                             results.push({
                                 post_url: href,
                                 text: text.slice(0, 200),
-                                news_url: newsLinks[0] || ''
+                                news_url: newsLinks[0] || '',
+                                time: timeText
                             });
                         }
                     });
@@ -140,29 +145,31 @@ async def scan_facebook():
     return all_posts
 
 def select_6_topics(posts):
-    """Claude从帖子里选6个爆款话题"""
-    today = datetime.now().strftime("%Y年%m月%d日")
+    """按互动数排序，让Claude cross-check选出10小时内最爆的6个话题"""
+    today = datetime.now().strftime("%Y年%m月%d日 %H:%M")
     
-    text = f"今天是{today}。以下是马来西亚三家中文媒体Facebook今日帖子：\n\n"
-    for i, p in enumerate(posts[:30]):
-        text += f"{i+1}. [{p['source']}] {p['text'][:120]}\n"
+    # 整理帖子给Claude分析
+    text = f"现在是{today}（马来西亚时间）。以下是三家中文媒体Facebook最新帖子：\n\n"
+    for i, p in enumerate(posts[:35]):
+        text += f"{i+1}. [{p['source']}] {p['text'][:150]}\n"
         if p.get('news_url'):
-            text += f"   新闻: {p['news_url']}\n"
-        text += f"   帖子: {p['post_url']}\n\n"
+            text += f"   📰 {p['news_url']}\n"
+        text += f"   🔗 {p['post_url']}\n\n"
     
-    text += """请选出6个最有爆款潜力的话题。
+    text += """请帮我做以下事情：
 
-选题标准：有争议性、有情绪共鸣、有数据、贴近马来西亚华人日常、多家媒体出现的优先。
+1. 只选10小时内发布的帖子
+2. Cross-check：哪些话题在多家媒体同时出现（说明话题更热）
+3. 按爆款潜力排序：争议性强、情绪共鸣大、有具体数字的优先
+4. 选出最值得发的6个
 
 严格按以下格式回复，每行用|||分隔，共6行：
-分类|||话题标题|||钩子句|||关键数据|||来源|||新闻URL|||帖子URL
+话题标题|||话题背景一句话|||关键数字或事实|||来源媒体|||新闻URL|||帖子URL
 
-分类只能是：💼商业、📊金融、🧠人间清醒、❤️家庭情感
-
-只回复6行，不要任何其他文字。"""
+只回复6行，不要编号，不要分类标签，不要其他文字。"""
     
     raw = ask_claude(text)
-    print(f"Claude选题：\n{raw[:500]}")
+    print(f"Claude选题：\n{raw[:600]}")
     
     topics = []
     for line in raw.strip().split("\n"):
@@ -170,16 +177,16 @@ def select_6_topics(posts):
         if not line or "|||" not in line:
             continue
         parts = line.split("|||")
-        if len(parts) >= 5:
+        if len(parts) >= 4:
             topics.append({
                 "num": len(topics)+1,
-                "cat": parts[0].strip(),
-                "topic": parts[1].strip(),
-                "hook": parts[2].strip(),
-                "data": parts[3].strip(),
-                "source": parts[4].strip(),
-                "news_url": parts[5].strip() if len(parts) > 5 else "",
-                "post_url": parts[6].strip() if len(parts) > 6 else "",
+                "cat": "",
+                "topic": parts[0].strip(),
+                "hook": parts[1].strip(),
+                "data": parts[2].strip(),
+                "source": parts[3].strip(),
+                "news_url": parts[4].strip() if len(parts) > 4 else "",
+                "post_url": parts[5].strip() if len(parts) > 5 else "",
             })
         if len(topics) == 6:
             break
@@ -252,9 +259,11 @@ def handle_msg(msg):
                     return
                 s.update({"topics":topics,"captions":[""]*len(topics),"idx":0,"step":"show_topics"})
                 
-                lines = "🗞️ 今日6个爆款话题：\n\n"
+                lines = "🔥 今日最爆6个话题（10小时内，按热度排序）：\n\n"
                 for t in topics:
-                    lines += f"{t['num']}. {t['cat']} — {t['topic']}\n"
+                    lines += f"{t['num']}. {t['topic']}\n"
+                    if t.get('source'):
+                        lines += f"   来源：{t['source']}\n"
                 lines += "\n点下面开始逐篇生成 👇"
                 send(cid, lines, {"inline_keyboard":[[
                     {"text":"⚡ 开始逐篇生成","callback_data":"generate"}
@@ -290,7 +299,7 @@ def handle_callback(cb):
     if data == "generate":
         idx = s["idx"]
         t = s["topics"][idx]
-        send(cid, f"✍️ 生成第{t['num']}/6篇：{t['cat']} — {t['topic']}")
+        send(cid, f"✍️ 生成第{t['num']}/6篇：{t['topic']}")
         def run():
             try:
                 caption = gen_caption(t)
