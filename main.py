@@ -1,48 +1,25 @@
-import os, json, requests, time, anthropic, re, asyncio, threading
+import os, json, requests, time, anthropic, re, threading
 from datetime import datetime
-from PIL import Image, ImageDraw, ImageFont
-import io
+from playwright.async_api import async_playwright
+import asyncio
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHANNEL_ID = os.environ["CHANNEL_ID"]
 CLAUDE_API_KEY = os.environ["CLAUDE_API_KEY"]
 AUTHORIZED_USER = int(os.environ["AUTHORIZED_USER"])
-SCRAPINGBEE_KEY = os.environ.get("SCRAPINGBEE_KEY", "QNEIXTNF4SKJV562MWIFDUR52VYK4R2D8XAFA5HLLAEID57WUH0TM5KOFTAIRIG7CBBRLUV4QPBCLH62")
 BASE = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
-def send(chat_id, text, reply_markup=None):
+def send(chat_id, text, reply_markup=None, parse_mode=None):
     data = {"chat_id": chat_id, "text": text}
     if reply_markup:
         data["reply_markup"] = json.dumps(reply_markup)
+    if parse_mode:
+        data["parse_mode"] = parse_mode
     try:
         return requests.post(f"{BASE}/sendMessage", json=data, timeout=30).json()
     except:
         return {}
-
-def send_photo_bytes(chat_id, img_bytes, caption, reply_markup=None):
-    data = {"chat_id": chat_id, "caption": caption}
-    if reply_markup:
-        data["reply_markup"] = json.dumps(reply_markup)
-    try:
-        return requests.post(f"{BASE}/sendPhoto", data=data,
-            files={"photo": ("news.jpg", img_bytes, "image/jpeg")}, timeout=30).json()
-    except:
-        return {}
-
-def send_channel(img_bytes, caption):
-    try:
-        if img_bytes:
-            r = requests.post(f"{BASE}/sendPhoto",
-                data={"chat_id": CHANNEL_ID, "caption": caption},
-                files={"photo": ("news.jpg", img_bytes, "image/jpeg")}, timeout=30).json()
-            if r.get("ok"):
-                return True
-        requests.post(f"{BASE}/sendMessage",
-            json={"chat_id": CHANNEL_ID, "text": caption}, timeout=30)
-        return True
-    except:
-        return False
 
 def answer_cb(cb_id):
     try:
@@ -73,90 +50,120 @@ SYSTEM = """你是Edison Lim (@edison_ttm) 的内容助手，专门为马来西�
 
 要求：口语化马来西亚华语、短句有节奏、用「—」分段、200-300字、加hashtag"""
 
-NEWS_SITES = [
-    {"name": "星洲日报", "url": "https://www.sinchew.com.my"},
-    {"name": "中国报", "url": "https://www.chinapress.com.my"},
-    {"name": "南洋商报", "url": "https://www.enanyang.my"},
-    {"name": "东方日报", "url": "https://www.orientaldaily.com.my"},
-]
-
-def scrape_with_bee(url, render_js=True, wait=3000):
-    """用ScrapingBee抓取任何页面"""
-    r = requests.get(
-        "https://app.scrapingbee.com/api/v1/",
-        params={
-            "api_key": SCRAPINGBEE_KEY,
-            "url": url,
-            "render_js": "true" if render_js else "false",
-            "wait": str(wait),
-        },
-        timeout=60
-    )
-    print(f"ScrapingBee {url[:50]}: {r.status_code}, {len(r.content)} bytes")
-    if r.status_code == 200:
-        return r.text
-    return None
-
-def scrape_news_sites():
-    """抓取新闻网站，提取今日新闻列表"""
-    all_articles = []
-
-    for site in NEWS_SITES:
-        try:
-            html = scrape_with_bee(site["url"])
-            if not html:
-                continue
-
-            # 提取所有链接和标题
-            links = re.findall(r'href=["\']([^"\']+)["\'][^>]*>([^<]{10,150})<', html)
-            
-            for href, text in links:
-                text = re.sub(r'\s+', ' ', text).strip()
-                if len(text) < 10 or len(text) > 200:
-                    continue
-                # 过滤非新闻链接
-                if any(k in href.lower() for k in ['#','javascript','mailto','facebook','twitter']):
-                    continue
-                # 只要该媒体自己的链接
-                domain = site["url"].replace("https://www.", "")
-                if domain not in href and not href.startswith("/"):
-                    continue
+# ── Playwright 扫Facebook ────────────────────────────
+async def scan_facebook():
+    """扫描三家Facebook，返回帖子列表（含直链）"""
+    FB_PAGES = [
+        {"name": "星洲日报", "url": "https://www.facebook.com/SinChewDaily"},
+        {"name": "中国报", "url": "https://www.facebook.com/ChinaPressMY"},
+        {"name": "南洋商报", "url": "https://www.facebook.com/nanyang.nysp"},
+    ]
+    
+    all_posts = []
+    
+    async with async_playwright() as p:
+        browser = await p.chromium.connect_over_cdp("http://localhost:9222") if False else \
+                  await p.chromium.launch(headless=True, args=[
+                      "--no-sandbox","--disable-setuid-sandbox",
+                      "--disable-dev-shm-usage","--disable-gpu"
+                  ])
+        ctx = await browser.new_context(
+            viewport={"width":1280,"height":900},
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
+            locale="zh-CN"
+        )
+        page = await ctx.new_page()
+        
+        for fb in FB_PAGES:
+            try:
+                print(f"扫描: {fb['url']}")
+                await page.goto(fb["url"], wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(6000)
+                
+                # 滚动加载帖子
+                for _ in range(3):
+                    await page.evaluate("window.scrollBy(0, 600)")
+                    await page.wait_for_timeout(2000)
+                
+                # 找帖子：文字+直链
+                posts = await page.evaluate("""() => {
+                    const results = [];
+                    const seen = new Set();
                     
-                full_url = href if href.startswith("http") else site["url"] + href
-                all_articles.append({
-                    "title": text,
-                    "url": full_url,
-                    "source": site["name"]
-                })
+                    // 找所有帖子链接
+                    const allLinks = [...document.querySelectorAll('a[href*="/posts/"], a[href*="/permalink/"]')];
+                    
+                    allLinks.forEach(a => {
+                        const href = a.href;
+                        if (seen.has(href)) return;
+                        seen.add(href);
+                        
+                        // 找最近的帖子容器
+                        const container = a.closest('[role="article"]') || a.closest('div[data-pagelet]') || a.parentElement;
+                        
+                        // 找文字
+                        const textEl = container?.querySelector('[data-ad-comet-preview="message"]') ||
+                                       container?.querySelector('[data-testid="post_message"]') ||
+                                       container?.querySelector('p, span[dir="auto"]');
+                        const text = textEl?.innerText?.trim() || '';
+                        
+                        // 找新闻链接
+                        const newsLinks = [...(container?.querySelectorAll('a[href]') || [])]
+                            .map(l => l.href)
+                            .filter(h => h.includes('sinchew') || h.includes('chinapress') || 
+                                        h.includes('enanyang') || h.includes('orientaldaily') ||
+                                        h.includes('malaymail') || h.includes('thestar') ||
+                                        h.includes('focusmalaysia'));
+                        
+                        if (text.length > 15 || newsLinks.length > 0) {
+                            results.push({
+                                post_url: href,
+                                text: text.slice(0, 200),
+                                news_url: newsLinks[0] || ''
+                            });
+                        }
+                    });
+                    
+                    return results.slice(0, 20);
+                }""")
+                
+                for p in posts:
+                    p["source"] = fb["name"]
+                all_posts.extend(posts)
+                print(f"✅ {fb['name']}: {len(posts)} 条帖子")
+                
+            except Exception as e:
+                print(f"❌ {fb['name']}: {e}")
+        
+        await browser.close()
+    
+    return all_posts
 
-            print(f"✅ {site['name']}: {len([a for a in all_articles if a['source']==site['name']])} 篇")
-        except Exception as e:
-            print(f"❌ {site['name']}: {e}")
-
-    return all_articles
-
-def select_topics(articles):
-    """Claude选出6个爆款话题"""
+def select_6_topics(posts):
+    """Claude从帖子里选6个爆款话题"""
     today = datetime.now().strftime("%Y年%m月%d日")
     
-    news_text = f"今天是{today}。以下是马来西亚中文媒体今日新闻：\n\n"
-    for i, a in enumerate(articles[:60]):
-        news_text += f"{i+1}. [{a['source']}] {a['title']} | {a['url']}\n"
+    text = f"今天是{today}。以下是马来西亚三家中文媒体Facebook今日帖子：\n\n"
+    for i, p in enumerate(posts[:30]):
+        text += f"{i+1}. [{p['source']}] {p['text'][:120]}\n"
+        if p.get('news_url'):
+            text += f"   新闻: {p['news_url']}\n"
+        text += f"   帖子: {p['post_url']}\n\n"
     
-    news_text += """\n请选出6个最有爆款潜力的话题。
+    text += """请选出6个最有爆款潜力的话题。
 
-选题标准：有争议性、有情绪共鸣、有数据、贴近马来西亚华人日常。
+选题标准：有争议性、有情绪共鸣、有数据、贴近马来西亚华人日常、多家媒体出现的优先。
 
 严格按以下格式回复，每行用|||分隔，共6行：
-分类|||话题标题|||钩子句|||关键数据|||来源媒体|||新闻URL
+分类|||话题标题|||钩子句|||关键数据|||来源|||新闻URL|||帖子URL
 
 分类只能是：💼商业、📊金融、🧠人间清醒、❤️家庭情感
 
 只回复6行，不要任何其他文字。"""
-
-    raw = ask_claude(news_text)
-    print(f"Claude选题：\n{raw[:400]}")
-
+    
+    raw = ask_claude(text)
+    print(f"Claude选题：\n{raw[:500]}")
+    
     topics = []
     for line in raw.strip().split("\n"):
         line = line.strip()
@@ -171,127 +178,12 @@ def select_topics(articles):
                 "hook": parts[2].strip(),
                 "data": parts[3].strip(),
                 "source": parts[4].strip(),
-                "url": parts[5].strip() if len(parts) >= 6 else "",
+                "news_url": parts[5].strip() if len(parts) > 5 else "",
+                "post_url": parts[6].strip() if len(parts) > 6 else "",
             })
         if len(topics) == 6:
             break
     return topics
-
-def get_article_image(article_url, topic):
-    """用ScrapingBee打开文章，提取og:image并下载"""
-    if not article_url or not article_url.startswith("http"):
-        return None
-    
-    try:
-        print(f"抓取文章图片: {article_url[:80]}")
-        html = scrape_with_bee(article_url, render_js=True, wait=3000)
-        if not html:
-            return None
-
-        # 找og:image
-        og_matches = re.findall(
-            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](https?://[^"\'>\s]+)["\']',
-            html
-        )
-        if not og_matches:
-            og_matches = re.findall(
-                r'content=["\'](https?://[^"\'>\s]+)["\'][^>]+property=["\']og:image["\']',
-                html
-            )
-        
-        # 也找twitter:image
-        if not og_matches:
-            og_matches = re.findall(
-                r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\'](https?://[^"\'>\s]+)["\']',
-                html
-            )
-
-        print(f"找到{len(og_matches)}个图片URL")
-        
-        for img_url in og_matches[:3]:
-            img_url = img_url.replace("&amp;", "&")
-            # 排除广告/图标
-            if any(k in img_url.lower() for k in ['logo','icon','favicon','banner','default']):
-                continue
-            
-            print(f"下载: {img_url[:80]}")
-            # 用ScrapingBee下载图片（绕过防盗链）
-            r = requests.get(
-                "https://app.scrapingbee.com/api/v1/",
-                params={
-                    "api_key": SCRAPINGBEE_KEY,
-                    "url": img_url,
-                    "render_js": "false",
-                },
-                timeout=30
-            )
-            print(f"图片下载: {r.status_code}, {len(r.content)} bytes, {r.headers.get('content-type','')}")
-            if r.status_code == 200 and len(r.content) > 10000:
-                ct = r.headers.get('content-type', '')
-                if any(t in ct for t in ['image','jpeg','png','webp','jpg']):
-                    print("✅ 图片下载成功")
-                    return r.content
-                    
-    except Exception as e:
-        print(f"文章图片失败: {e}")
-    
-    return None
-
-def add_title_to_image(img_bytes, title, source):
-    """在图片上叠加新闻标题和来源"""
-    try:
-        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        
-        # 调整图片大小
-        img = img.resize((800, 500), Image.LANCZOS)
-        w, h = img.size
-        
-        draw = ImageDraw.Draw(img)
-        
-        # 底部加深色渐变背景
-        overlay = Image.new("RGBA", (w, 200), (0, 0, 0, 0))
-        overlay_draw = ImageDraw.Draw(overlay)
-        for i in range(200):
-            alpha = int(200 * (i / 200))
-            overlay_draw.rectangle([0, i, w, i+1], fill=(0, 0, 0, alpha))
-        img = img.convert("RGBA")
-        img.paste(overlay, (0, h-200), overlay)
-        img = img.convert("RGB")
-        draw = ImageDraw.Draw(img)
-        
-        # 用默认字体（避免字体文件问题）
-        try:
-            font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
-            font_source = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
-        except:
-            font_title = ImageFont.load_default()
-            font_source = ImageFont.load_default()
-        
-        # 截断标题
-        max_chars = 24
-        if len(title) > max_chars:
-            line1 = title[:max_chars]
-            line2 = title[max_chars:max_chars*2]
-        else:
-            line1 = title
-            line2 = ""
-        
-        # 画标题（白色）
-        draw.text((20, h-180), line1, font=font_title, fill="white")
-        if line2:
-            draw.text((20, h-145), line2, font=font_title, fill="white")
-        
-        # 画来源（灰色）
-        draw.text((20, h-50), f"来源：{source}", font=font_source, fill="#CCCCCC")
-        
-        # 转回bytes
-        output = io.BytesIO()
-        img.save(output, format="JPEG", quality=90)
-        return output.getvalue()
-        
-    except Exception as e:
-        print(f"叠加标题失败: {e}")
-        return img_bytes
 
 def gen_caption(t):
     return ask_claude(f"""话题：{t['topic']}
@@ -310,26 +202,33 @@ def optimize(original, feedback, t):
 
 根据反馈优化，保持timtiah结构200-300字，只回复新文案。""", SYSTEM)
 
+def publish_to_channel(caption):
+    requests.post(f"{BASE}/sendMessage",
+        json={"chat_id": CHANNEL_ID, "text": caption}, timeout=30)
+
+# ── 按钮 ─────────────────────────────────────────────
 BTN_CAPTION = {"inline_keyboard":[[
-    {"text":"✅ 文案满意","callback_data":"caption_ok"},
-    {"text":"✏️ 修改文案","callback_data":"caption_edit"}
+    {"text":"✅ 文案满意", "callback_data":"caption_ok"},
+    {"text":"✏️ 修改文案", "callback_data":"caption_edit"}
 ]]}
 BTN_PUBLISH = {"inline_keyboard":[[
-    {"text":"✅ 发布到频道","callback_data":"publish"},
-    {"text":"⏭️ 下一篇","callback_data":"next"}
+    {"text":"✅ 发布文案到频道", "callback_data":"publish"},
+    {"text":"⏭️ 下一篇", "callback_data":"next"}
 ]]}
 BTN_NEXT = {"inline_keyboard":[[
-    {"text":"▶️ 下一篇","callback_data":"next"},
-    {"text":"🏁 今天完成","callback_data":"done"}
+    {"text":"▶️ 下一篇", "callback_data":"next"},
+    {"text":"🏁 今天完成", "callback_data":"done"}
 ]]}
 
+# ── 状态 ─────────────────────────────────────────────
 state = {}
 
 def get_s(uid):
     if uid not in state:
-        state[uid] = {"step":"idle","topics":[],"captions":[],"screenshots":[],"idx":0}
+        state[uid] = {"step":"idle","topics":[],"captions":[],"idx":0}
     return state[uid]
 
+# ── 消息处理 ─────────────────────────────────────────
 def handle_msg(msg):
     uid = msg["from"]["id"]
     cid = msg["chat"]["id"]
@@ -339,20 +238,20 @@ def handle_msg(msg):
     s = get_s(uid)
 
     if text in ["开始","给我今天的内容","今天的内容","/start","/content"]:
-        send(cid, "⚡ 正在扫描星洲日报、中国报、南洋商报、东方日报，请稍等约1分钟...")
+        send(cid, "⚡ 正在扫描星洲日报、中国报、南洋商报 Facebook，请稍等约1分钟...")
         def run():
             try:
-                articles = scrape_news_sites()
-                if not articles:
+                posts = asyncio.run(scan_facebook())
+                if not posts:
                     send(cid, "❌ 扫描失败，请重试")
                     return
-                send(cid, f"📰 扫描到{len(articles)}篇新闻，Claude正在选出6个爆款话题...")
-                topics = select_topics(articles)
+                send(cid, f"📱 扫到{len(posts)}条帖子，正在选出6个爆款话题...")
+                topics = select_6_topics(posts)
                 if not topics:
                     send(cid, "❌ 选题失败，请重试")
                     return
-                s.update({"topics":topics,"captions":[""]*len(topics),
-                          "screenshots":[None]*len(topics),"idx":0,"step":"show_topics"})
+                s.update({"topics":topics,"captions":[""]*len(topics),"idx":0,"step":"show_topics"})
+                
                 lines = "🗞️ 今日6个爆款话题：\n\n"
                 for t in topics:
                     lines += f"{t['num']}. {t['cat']} — {t['topic']}\n"
@@ -397,6 +296,8 @@ def handle_callback(cb):
                 caption = gen_caption(t)
                 s["captions"][idx] = caption
                 s["step"] = "review_caption"
+                
+                # 发文案
                 send(cid, f"📝 第{t['num']}/6 文案：\n\n{caption}", BTN_CAPTION)
             except Exception as e:
                 send(cid, f"❌ 生成失败：{e}")
@@ -406,24 +307,18 @@ def handle_callback(cb):
     if data == "caption_ok":
         idx = s["idx"]
         t = s["topics"][idx]
-        s["step"] = "review_image"
-        send(cid, "📸 正在获取新闻配图，请稍等约30秒...")
-        def run():
-            try:
-                img = get_article_image(t.get("url",""), t["topic"])
-                if img:
-                    # 叠加标题到图片
-                    img = add_title_to_image(img, t["topic"], t["source"])
-                    s["screenshots"][idx] = img
-                    r = send_photo_bytes(cid, img, f"🖼️ 配图预览（{t['source']}）")
-                    if r.get("ok"):
-                        send(cid, "满意就发布 👇", BTN_PUBLISH)
-                        return
-                send(cid, "⚠️ 未能获取配图，直接发布文案？", BTN_PUBLISH)
-            except Exception as e:
-                print(f"配图错误: {e}")
-                send(cid, "⚠️ 配图失败，直接发布文案？", BTN_PUBLISH)
-        threading.Thread(target=run, daemon=True).start()
+        s["step"] = "review"
+        
+        # 发链接让用户下载图片
+        links_msg = f"📌 第{t['num']}篇配图链接：\n\n"
+        
+        if t.get("post_url"):
+            links_msg += f"🖼️ Facebook帖子（有图）：\n{t['post_url']}\n\n"
+        if t.get("news_url"):
+            links_msg += f"📰 新闻原文：\n{t['news_url']}\n\n"
+        
+        links_msg += "👆 点链接保存图片后，按下面发布文案到频道"
+        send(cid, links_msg, BTN_PUBLISH)
         return
 
     if data == "caption_edit":
@@ -435,10 +330,9 @@ def handle_callback(cb):
         idx = s["idx"]
         t = s["topics"][idx]
         caption = s["captions"][idx]
-        img = s["screenshots"][idx]
         try:
-            send_channel(img, caption)
-            send(cid, f"✅ 第{t['num']}篇已发布！", BTN_NEXT)
+            publish_to_channel(caption)
+            send(cid, f"✅ 第{t['num']}篇文案已发布到频道！\n\n记得手动配上你从Facebook保存的图片 📸", BTN_NEXT)
             s["step"] = "published"
         except Exception as e:
             send(cid, f"❌ 发布失败：{e}")
@@ -462,7 +356,7 @@ def handle_callback(cb):
         return
 
 def main():
-    print("✅ Edison Bot V2 启动！")
+    print("✅ Edison Bot 启动！")
     offset = 0
     while True:
         try:
