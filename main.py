@@ -85,50 +85,83 @@ async def scan_facebook():
                     await page.evaluate("window.scrollBy(0, 600)")
                     await page.wait_for_timeout(2000)
                 
-                # 找帖子：文字+直链
+                # 找帖子：文字+直链+互动数
                 posts = await page.evaluate("""() => {
                     const results = [];
                     const seen = new Set();
                     
-                    // 找所有帖子链接
-                    const allLinks = [...document.querySelectorAll('a[href*="/posts/"], a[href*="/permalink/"]')];
+                    // 找所有帖子容器
+                    const articles = document.querySelectorAll('[role="article"]');
                     
-                    allLinks.forEach(a => {
-                        const href = a.href;
+                    articles.forEach(container => {
+                        // 找帖子直链
+                        const postLink = container.querySelector('a[href*="/posts/"], a[href*="/permalink/"]');
+                        if (!postLink) return;
+                        
+                        const href = postLink.href;
                         if (seen.has(href)) return;
                         seen.add(href);
                         
-                        // 找最近的帖子容器
-                        const container = a.closest('[role="article"]') || a.closest('div[data-pagelet]') || a.parentElement;
-                        
-                        // 找文字
-                        const textEl = container?.querySelector('[data-ad-comet-preview="message"]') ||
-                                       container?.querySelector('[data-testid="post_message"]') ||
-                                       container?.querySelector('p, span[dir="auto"]');
-                        const text = textEl?.innerText?.trim() || '';
+                        // 找文字内容
+                        const allText = container.innerText || '';
+                        const lines = allText.split('\n').filter(l => l.trim().length > 10);
+                        const text = lines.slice(0, 5).join(' ').trim().slice(0, 250);
                         
                         // 找新闻链接
-                        const newsLinks = [...(container?.querySelectorAll('a[href]') || [])]
+                        const newsLinks = [...container.querySelectorAll('a[href]')]
                             .map(l => l.href)
                             .filter(h => h.includes('sinchew') || h.includes('chinapress') || 
                                         h.includes('enanyang') || h.includes('orientaldaily') ||
-                                        h.includes('malaymail') || h.includes('thestar') ||
-                                        h.includes('focusmalaysia'));
+                                        h.includes('malaymail') || h.includes('thestar'));
                         
-                        // 找时间
-                        const timeEl = container?.querySelector('abbr, [data-utime], span[id*="jsc"]');
-                        const timeText = timeEl?.getAttribute('title') || timeEl?.innerText || '';
+                        // 抓互动数（like/comment/share数字）
+                        let likes = 0, comments = 0, shares = 0;
+                        const allNums = allText.match(/\d[\d,]*/g) || [];
                         
-                        if (text.length > 15 || newsLinks.length > 0) {
+                        // Facebook通常格式：数字K 或 纯数字
+                        const interactionEl = container.querySelectorAll('span[aria-hidden="true"], div[role="button"]');
+                        interactionEl.forEach(el => {
+                            const t = el.innerText || '';
+                            const num = parseFloat(t.replace(',','').replace('K','000').replace('k','000'));
+                            if (!isNaN(num) && num > 0 && num < 1000000) {
+                                if (likes === 0) likes = num;
+                                else if (comments === 0) comments = num;
+                                else if (shares === 0) shares = num;
+                            }
+                        });
+                        
+                        // 备用：找包含数字的span
+                        if (likes === 0) {
+                            const spans = [...container.querySelectorAll('span')];
+                            spans.forEach(s => {
+                                const t = (s.innerText||'').trim();
+                                if (/^[\d,\.]+K?$/.test(t)) {
+                                    const n = parseFloat(t.replace(',','').replace('K','000'));
+                                    if (n > 0 && n < 500000) {
+                                        if (likes === 0) likes = n;
+                                        else if (comments === 0) comments = n;
+                                    }
+                                }
+                            });
+                        }
+                        
+                        const total_engagement = likes + comments * 3 + shares * 5;
+                        
+                        if (text.length > 15) {
                             results.push({
                                 post_url: href,
-                                text: text.slice(0, 200),
+                                text: text,
                                 news_url: newsLinks[0] || '',
-                                time: timeText
+                                likes: Math.round(likes),
+                                comments: Math.round(comments),
+                                shares: Math.round(shares),
+                                total: Math.round(total_engagement)
                             });
                         }
                     });
                     
+                    // 按互动数排序
+                    results.sort((a, b) => b.total - a.total);
                     return results.slice(0, 20);
                 }""")
                 
@@ -149,24 +182,36 @@ def select_6_topics(posts):
     today = datetime.now().strftime("%Y年%m月%d日 %H:%M")
     
     # 整理帖子给Claude分析
-    text = f"现在是{today}（马来西亚时间）。以下是三家中文媒体Facebook最新帖子：\n\n"
+    text = f"现在是{today}（马来西亚时间）。以下是三家中文媒体Facebook帖子，已按互动数从高到低排序：\n\n"
     for i, p in enumerate(posts[:35]):
-        text += f"{i+1}. [{p['source']}] {p['text'][:150]}\n"
+        engagement = p.get('total', 0)
+        likes = p.get('likes', 0)
+        comments = p.get('comments', 0)
+        text += f"{i+1}. [{p['source']}] 👍{likes} 💬{comments} 🔥总分{engagement}\n"
+        text += f"   内容：{p['text'][:150]}\n"
         if p.get('news_url'):
             text += f"   📰 {p['news_url']}\n"
         text += f"   🔗 {p['post_url']}\n\n"
     
-    text += """请帮我做以下事情：
+    text += """请做严格的cross-check分析：
 
-1. 只选10小时内发布的帖子
-2. Cross-check：哪些话题在多家媒体同时出现（说明话题更热）
-3. 按爆款潜力排序：争议性强、情绪共鸣大、有具体数字的优先
-4. 选出最值得发的6个
+【第一步：找重叠话题】
+找出同一个话题在2家或以上媒体同时出现的——这些才是真正的爆款。
+
+【第二步：按优先级排序】
+优先级从高到低：
+① 3家媒体都有 + 互动数高 ← 最爆
+② 2家媒体都有 + 互动数高
+③ 只有1家但互动数极高（like+comment超过500）
+④ 其他不要选
+
+【第三步：选6个】
+从上面选出6个最值得做的话题，必须有争议性或情绪共鸣，有具体数字。
 
 严格按以下格式回复，每行用|||分隔，共6行：
-话题标题|||话题背景一句话|||关键数字或事实|||来源媒体|||新闻URL|||帖子URL
+话题标题|||一句话背景|||关键数字或事实|||出现媒体（如：星洲+中国报）|||新闻URL|||帖子URL
 
-只回复6行，不要编号，不要分类标签，不要其他文字。"""
+只回复6行，不要任何其他文字。"""
     
     raw = ask_claude(text)
     print(f"Claude选题：\n{raw[:600]}")
@@ -259,12 +304,12 @@ def handle_msg(msg):
                     return
                 s.update({"topics":topics,"captions":[""]*len(topics),"idx":0,"step":"show_topics"})
                 
-                lines = "🔥 今日最爆6个话题（10小时内，按热度排序）：\n\n"
+                lines = "🔥 今日最爆6个话题（按互动数排序）：\n\n"
                 for t in topics:
                     lines += f"{t['num']}. {t['topic']}\n"
                     if t.get('source'):
-                        lines += f"   来源：{t['source']}\n"
-                lines += "\n点下面开始逐篇生成 👇"
+                        lines += f"   📌 {t['source']}\n"
+                lines += "\n满意就点开始生成文案 👇"
                 send(cid, lines, {"inline_keyboard":[[
                     {"text":"⚡ 开始逐篇生成","callback_data":"generate"}
                 ]]})
