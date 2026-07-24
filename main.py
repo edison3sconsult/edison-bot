@@ -8,6 +8,9 @@ CHANNEL_ID = os.environ["CHANNEL_ID"]
 CLAUDE_API_KEY = os.environ["CLAUDE_API_KEY"]
 AUTHORIZED_USER = int(os.environ["AUTHORIZED_USER"])
 BASE = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+import threading as _threading
+_scanning_lock = _threading.Lock()
+_is_scanning = False
 client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
 def send(chat_id, text, reply_markup=None, parse_mode=None):
@@ -245,6 +248,11 @@ def handle_msg(msg):
     s = get_s(uid)
 
     if text in ["开始","给我今天的内容","今天的内容","/start","/content"]:
+        global _is_scanning
+        if _is_scanning:
+            send(cid, "⏳ 正在扫描中，请稍等...")
+            return
+        _is_scanning = True
         send(cid, "⚡ 正在扫描星洲日报、中国报、南洋商报 Facebook，请稍等约1分钟...")
         def run():
             try:
@@ -270,6 +278,9 @@ def handle_msg(msg):
                 ]]})
             except Exception as e:
                 send(cid, f"❌ 失败：{e}\n\n请重试")
+            finally:
+                global _is_scanning
+                _is_scanning = False
         threading.Thread(target=run, daemon=True).start()
         return
 
